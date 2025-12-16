@@ -1,0 +1,29 @@
+[package]
+name = "op-chat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Orchestration layer for op-dbus-v2 system"
+
+[dependencies]
+# Workspace crates
+op-core = { workspace = true }
+op-tools = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Additional utilities
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }

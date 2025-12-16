@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command -v:*)",
+      "Bash(source /home/jeremy/.bashrc)",
+      "Bash(echo:*)",
+      "Bash(chmod:*)",
+      "Bash(alias kilocode)"
+    ]
+  }
+}
