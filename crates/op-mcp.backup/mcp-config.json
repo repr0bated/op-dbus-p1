@@ -1,0 +1,13 @@
+[
+  {
+    "name": "filesystem",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-filesystem",
+      "/home/jeremy/op-dbus-v2"
+    ],
+    "env": {},
+    "auth_method": "none"
+  }
+]

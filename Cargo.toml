@@ -1,80 +1,149 @@
 [workspace]
 resolver = "2"
 members = [
+    "op-dbus-service",
     "crates/op-core",
     "crates/op-tools",
+    "crates/op-introspection",
     "crates/op-chat",
+    "crates/op-http",
+    "crates/op-web",
+    "crates/op-web-ui",
+    "crates/op-cache",
+    "crates/op-state",
+    "crates/op-state-store",
+    "crates/op-jsonrpc",
+    "crates/op-llm",
+    "crates/op-network",
+    "crates/op-inspector",
+    "crates/op-agents",
+    "crates/op-plugins",
+    "crates/op-workflows",
+    "crates/op-ml",
+    "crates/op-blockchain",
+    "crates/op-deployment",
     "crates/op-mcp",
+    "crates/op-execution-tracker",
+    "crates/op-dynamic-loader",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["op-dbus contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/op-dbus-v2-clean"
-homepage = "https://example.com"
 
 [workspace.dependencies]
-# Workspace members
-op-core = { path = "crates/op-core", version = "0.3.0" }
-op-tools = { path = "crates/op-tools", version = "0.3.0" }
-op-chat = { path = "crates/op-chat", version = "0.3.0" }
-op-mcp = { path = "crates/op-mcp", version = "0.3.0" }
+# Internal Crates
+op-core = { path = "crates/op-core" }
+op-tools = { path = "crates/op-tools" }
+op-introspection = { path = "crates/op-introspection" }
+op-chat = { path = "crates/op-chat" }
+op-http = { path = "crates/op-http" }
+op-web = { path = "crates/op-web" }
+op-web-ui = { path = "crates/op-web-ui" }
+op-cache = { path = "crates/op-cache" }
+op-state = { path = "crates/op-state" }
+op-state-store = { path = "crates/op-state-store" }
+op-jsonrpc = { path = "crates/op-jsonrpc" }
+op-llm = { path = "crates/op-llm" }
+op-network = { path = "crates/op-network" }
+op-inspector = { path = "crates/op-inspector" }
+op-agents = { path = "crates/op-agents" }
+op-plugins = { path = "crates/op-plugins" }
+op-workflows = { path = "crates/op-workflows" }
+op-ml = { path = "crates/op-ml" }
+op-blockchain = { path = "crates/op-blockchain" }
+op-deployment = { path = "crates/op-deployment" }
+op-mcp = { path = "crates/op-mcp" }
+op-execution-tracker = { path = "crates/op-execution-tracker" }
+op-dynamic-loader = { path = "crates/op-dynamic-loader" }
 
 # Async runtime
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "time", "signal", "sync"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 futures = "0.3"
-async-trait = { version = "0.1", workspace = true }
+async-trait = "0.1"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
 bincode = "1.3"
 
+# DBus
+zbus = { version = "5.12", default-features = false, features = ["tokio"] }
+zbus_xml = "5.0" # Latest available
+
+# Web/HTTP server
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace", "compression-gzip", "compression-br", "timeout"] }
+hyper = { version = "1.0", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+
+# TLS
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = "1"
+thiserror = "1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 log = "0.4"
 
-# HTTP/Web
-axum = { version = "0.7", features = ["ws", "macros"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "fs", "trace", "compression-gzip"] }
-hyper = { version = "1.0", features = ["full"] }
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+# Observability
+opentelemetry = { version = "0.20", features = ["metrics", "trace"] }
+prometheus = { version = "0.13", features = ["process"] }
 
-# D-Bus
-zbus = { version = "4.0", default-features = false, features = ["tokio"] }
-zbus_xml = "4.0"
+# Utils
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
+libc = "0.2"
+regex = "1"
+glob = "0.3"
+lazy_static = "1.4"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+lru = "0.12"
+num_cpus = "1.16"
+tar = "0.4"
+flate2 = "1"
+
+# Networking
+rtnetlink = "0.14"
+gethostname = "0.5"
+
+# Crypto
+sha2 = "0.10"
+md5 = "0.7"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.21"
 
 # Databases
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "json"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# Utilities
-uuid = { version = "1.6", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-tempfile = "3"
-lru = "0.12"
-regex = "1"
-lazy_static = "1.4"
+# Config
+config = { version = "0.14", features = ["toml"] }
 
-# Crypto
-sha2 = "0.10"
-md5 = "0.7"
-aes-gcm = "0.10"
-rand = "0.8"
-base64 = "0.21"
-
-# Monitoring
-opentelemetry = { version = "0.20", features = ["metrics", "trace"] }
-prometheus = { version = "0.13", features = ["process"] }
+# Web UI dependencies
+leptos = { version = "0.6", features = ["csr"] }
+leptos_router = { version = "0.6", features = ["csr"] }
+gloo-net = "0.5"
+gloo-timers = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"

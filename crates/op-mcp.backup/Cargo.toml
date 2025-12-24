@@ -1,0 +1,58 @@
+[package]
+name = "op-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clean MCP Protocol Adapter with Lazy Tool Loading"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config
+config = { workspace = true }
+
+# HTTP Server
+axum = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "trace"] }
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+# HTTP Client
+reqwest = { workspace = true }
+
+# Internal dependencies
+op-tools = { path = "../op-tools" }
+op-core = { path = "../op-core" }
+op-agents = { path = "../op-agents" }
+op-http = { path = "../op-http" }
+
+[features]
+default = []
+external-mcp = []
+
+[[bin]]
+name = "op-mcp-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "mcp-http-server"
+path = "src/bin/mcp-http-server.rs"
+
+[[bin]]
+name = "mcp-manager"
+path = "src/bin/mcp-manager.rs"

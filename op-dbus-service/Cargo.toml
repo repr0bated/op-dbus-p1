@@ -1,0 +1,28 @@
+[package]
+name = "op-dbus-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Workspace members
+op-core = { path = "../crates/op-core" }
+op-chat = { path = "../crates/op-chat" }
+op-tools = { path = "../crates/op-tools" }
+op-http = { path = "../crates/op-http" }
+# op-mcp = { path = "../crates/op-mcp" }
+# op-web = { path = "../crates/op-web" }
+op-agents = { path = "../crates/op-agents" }
+op-execution-tracker = { path = "../crates/op-execution-tracker" }
+op-state = { path = "../crates/op-state" }
+
+# Third-party
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zbus = { workspace = true }
+uuid = { workspace = true }

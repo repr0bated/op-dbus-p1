@@ -1,33 +1,43 @@
 [package]
 name = "op-tools"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
-description = "Tool registry and execution engine for op-dbus-v2"
+description = "Tool registry and execution for op-dbus-v2"
 
 [dependencies]
-# Workspace crates
-op-core = { workspace = true }
-
 # Async runtime
-tokio = { workspace = true, features = ["full"] }
-futures = { workspace = true }
+tokio = { workspace = true, features = ["full", "sync"] }
 async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
+
+# Logging
 tracing = { workspace = true }
 
-# Serialization
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-
-# Utilities
-uuid = { workspace = true, features = ["v4"] }
+# Time
 chrono = { workspace = true }
-lru = { workspace = true }
 
-# Additional dependencies
-num_cpus = "1.16"
-walkdir = "2"
+# D-Bus for agent execution
+zbus = { workspace = true }
+
+# Internal dependencies
+op-core = { path = "../op-core" }
+op-introspection = { path = "../op-introspection" }
+op-network = { path = "../op-network" }
+op-http = { path = "../op-http" }
+
+# Web
+axum = { workspace = true }
+
+# System info
+op-state = { workspace = true }
+lazy_static = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

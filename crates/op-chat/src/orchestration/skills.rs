@@ -339,6 +339,7 @@ impl SkillRegistry {
         self.register(
             Skill::new("python_debugging", "Enhanced Python debugging capabilities", "debugging")
                 .with_prompt("When debugging Python code, use pdb breakpoints and inspect variables systematically.")
+                .with_required_tool("agent_python_pro")
                 .with_variable("debug_level", json!("verbose"))
                 .with_priority(10)
         );
@@ -347,6 +348,7 @@ impl SkillRegistry {
         self.register(
             Skill::new("rust_optimization", "Rust performance optimization guidance", "optimization")
                 .with_prompt("Focus on zero-cost abstractions, avoid unnecessary allocations, use iterators.")
+                .with_required_tool("agent_rust_pro")
                 .with_priority(10)
         );
 
@@ -376,18 +378,26 @@ impl SkillRegistry {
                 .with_priority(5)
         );
 
-        // System administration skill
+        // OVS networking skill
         self.register(
-            Skill::new("system_admin", "System administration and management", "system")
-                .with_prompt("Use proper system administration practices. Check service status before making changes.")
+            Skill::new("ovs_networking", "Open vSwitch networking expertise", "networking")
+                .with_prompt("Use OVSDB JSON-RPC for bridge/port management. Never use ovs-vsctl CLI.")
+                .with_required_tool("ovs_create_bridge")
+                .with_required_tool("ovs_list_bridges")
                 .with_priority(10)
         );
 
-        // File operations skill
+        // Systemd management skill
         self.register(
-            Skill::new("file_operations", "Safe file and filesystem operations", "filesystem")
-                .with_prompt("Always validate file paths and permissions. Use atomic operations when possible.")
-                .with_priority(8)
+            Skill::new("systemd_management", "Systemd service management expertise", "system")
+                .with_prompt("Use D-Bus for systemd operations. Check service status before changes.")
+                .with_required_tool("systemd_status")
+                .with_constraint(SkillConstraint {
+                    constraint_type: ConstraintType::RequireBefore,
+                    target: "systemd_restart".to_string(),
+                    value: json!("systemd_status"),
+                })
+                .with_priority(10)
         );
     }
 }

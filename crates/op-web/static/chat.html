@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Chat Interface</title>
+    <link rel="stylesheet" href="chat-styles.css">
+</head>
+<body>
+    <div class="chat-container">
+        <!-- Header -->
+        <header class="chat-header">
+            <div class="header-content">
+                <h1>🤖 MCP Chat</h1>
+                <div class="header-info">
+                    <div class="provider-selector">
+                        <label for="providerSelect">Provider:</label>
+                        <select id="providerSelect" class="provider-dropdown">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <div class="model-selector">
+                        <label for="modelSelect">Model:</label>
+                        <select id="modelSelect" class="model-dropdown">
+                            <option value="">Loading models...</option>
+                        </select>
+                    </div>
+                    <span class="connection-status" id="connectionStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Connecting...</span>
+                    </span>
+                    <button class="theme-toggle" id="themeToggle">🌙</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Chat Area -->
+        <div class="chat-main">
+            <!-- Sidebar -->
+            <aside class="chat-sidebar" id="sidebar">
+                <div class="sidebar-section">
+                    <h3>Quick Commands</h3>
+                    <div class="quick-commands" id="quickCommands">
+                        <button class="quick-cmd" data-cmd="status">📊 Status</button>
+                        <button class="quick-cmd" data-cmd="list tools">🔧 List Tools</button>
+                        <button class="quick-cmd" data-cmd="list agents">🤖 List Agents</button>
+                        <button class="quick-cmd" data-cmd="help">📚 Help</button>
+                    </div>
+                </div>
+                
+                <div class="sidebar-section">
+                    <h3>Tool Templates</h3>
+                    <div class="tool-templates" id="toolTemplates">
+                        <div class="template-card" data-template="systemd">
+                            <span class="template-icon">⚙️</span>
+                            <span class="template-name">Systemd</span>
+                        </div>
+                        <div class="template-card" data-template="file">
+                            <span class="template-icon">📁</span>
+                            <span class="template-name">File</span>
+                        </div>
+                        <div class="template-card" data-template="network">
+                            <span class="template-icon">🌐</span>
+                            <span class="template-name">Network</span>
+                        </div>
+                        <div class="template-card" data-template="process">
+                            <span class="template-icon">📊</span>
+                            <span class="template-name">Process</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="sidebar-section">
+                    <h3>Active Context</h3>
+                    <div class="context-info" id="contextInfo">
+                        <div class="context-item">
+                            <span class="context-label">Session:</span>
+                            <span class="context-value" id="sessionId">-</span>
+                        </div>
+                        <div class="context-item">
+                            <span class="context-label">Messages:</span>
+                            <span class="context-value" id="messageCount">0</span>
+                        </div>
+                        <div class="context-item">
+                            <span class="context-label">Tools Used:</span>
+                            <span class="context-value" id="toolsUsed">0</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Chat Messages -->
+            <div class="chat-content">
+                <div class="messages-container" id="messagesContainer">
+                    <!-- Messages will be added here -->
+                </div>
+                
+                <!-- Input Area -->
+                <div class="chat-input-area">
+                    <div class="suggestions-container" id="suggestionsContainer" style="display: none;">
+                        <!-- Suggestions will appear here -->
+                    </div>
+                    
+                    <div class="input-wrapper">
+                        <textarea 
+                            id="chatInput" 
+                            class="chat-input" 
+                            placeholder="Type a command or question... (Press Tab for suggestions)"
+                            rows="1"
+                        ></textarea>
+                        <div class="input-actions">
+                            <button class="send-button" id="sendButton">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                    <path d="M2 21L23 12L2 3V10L17 12L2 14V21Z" fill="currentColor"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="input-help">
+                        <span>Press <kbd>Enter</kbd> to send • <kbd>Shift+Enter</kbd> for new line • <kbd>Tab</kbd> for suggestions</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tool Template Modal -->
+    <div class="modal" id="templateModal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Tool Template</h2>
+                <button class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body">
+                <form id="templateForm">
+                    <!-- Dynamic form fields will be added here -->
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="modalCancel">Cancel</button>
+                <button class="btn btn-primary" id="modalExecute">Execute</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="chat.js"></script>
+</body>
+</html>

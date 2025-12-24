@@ -1,0 +1,584 @@
+//! Direct OVSDB JSON-RPC client - no wrappers, pure native protocol
+//! Talks directly to /var/run/openvswitch/db.sock
+
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+
+/// Direct OVSDB JSON-RPC client
+pub struct OvsdbClient {
+    socket_path: String,
+}
+
+impl OvsdbClient {
+    /// Connect to OVSDB unix socket
+    pub fn new() -> Self {
+        Self {
+            socket_path: "/var/run/openvswitch/db.sock".to_string(),
+        }
+    }
+
+    /// Ensure OVSDB database is initialized (similar to ovs-vsctl init)
+    /// This ensures the Open_vSwitch table exists and is properly set up
+    pub async fn ensure_initialized(&self) -> Result<()> {
+        // Check if we can list databases - this verifies the connection works
+        let _ = self.list_dbs().await?;
+
+        // Try to get the schema - this verifies the database is properly initialized
+        let _ = self.get_schema().await?;
+
+        // Check if Open_vSwitch table exists and has basic structure
+        let dump = self.dump_open_vswitch().await?;
+        if dump.as_array().is_none_or(|arr| arr.is_empty()) {
+            log::warn!("OVSDB Open_vSwitch table appears empty - database may need initialization");
+            // Note: We don't auto-initialize here as it should be done by systemd/ovs-vsctl init
+        }
+
+        Ok(())
+    }
+
+    /// Send JSON-RPC request and get response
+    async fn rpc_call(&self, method: &str, params: Value) -> Result<Value> {
+        log::debug!(
+            "Attempting to connect to OVSDB socket: {}",
+            self.socket_path
+        );
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .await
+            .context("Failed to connect to OVSDB socket")?;
+        log::debug!("Successfully connected to OVSDB socket");
+
+        // Build JSON-RPC request
+        let request = json!({
+            "method": method,
+            "params": params,
+            "id": 0
+        });
+
+        // Send request
+        let request_str = serde_json::to_string(&request)?;
+        log::debug!("Sending OVSDB request: {}", request_str);
+        stream.write_all(request_str.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+        log::debug!("OVSDB request sent, waiting for response");
+
+        // Read response with timeout
+        // Try a simple approach first - read a fixed amount of data
+        let mut buffer = vec![0u8; 1024];
+
+        let read_result =
+            tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buffer))
+                .await;
+
+        let response_line = match read_result {
+            Ok(Ok(bytes_read)) => {
+                if bytes_read == 0 {
+                    return Err(anyhow::anyhow!("OVSDB connection closed by server"));
+                }
+
+                // Convert to string and find the JSON response
+                let response_data = &buffer[..bytes_read];
+                let response_str = String::from_utf8_lossy(response_data);
+                log::debug!(
+                    "Received OVSDB raw response ({} bytes): {}",
+                    bytes_read,
+                    response_str.trim()
+                );
+
+                // Find the JSON response (should start with '{')
+                if let Some(json_start) = response_str.find('{') {
+                    let json_response = &response_str[json_start..];
+                    // Find the end of the JSON (should end with '}')
+                    if let Some(json_end) = json_response.rfind('}') {
+                        let json_str = &json_response[..=json_end];
+                        log::debug!("Extracted JSON response: {}", json_str);
+                        json_str.to_string()
+                    } else {
+                        return Err(anyhow::anyhow!("Could not find end of JSON response"));
+                    }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "No JSON response found in: {}",
+                        response_str
+                    ));
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!("Failed to read OVSDB response: {}", e));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "OVSDB response timeout after sending: {}",
+                    request_str
+                ));
+            }
+        };
+
+        let response: Value = serde_json::from_str(&response_line)?;
+
+        // Check for error (only if it's not null)
+        if let Some(error) = response.get("error") {
+            if !error.is_null() {
+                return Err(anyhow::anyhow!("OVSDB error: {}", error));
+            }
+        }
+
+        Ok(response["result"].clone())
+    }
+
+    /// List all databases
+    pub async fn list_dbs(&self) -> Result<Vec<String>> {
+        let result = self.rpc_call("list_dbs", json!([])).await?;
+        Ok(serde_json::from_value(result)?)
+    }
+
+    /// Get schema for Open_vSwitch database
+    #[allow(dead_code)]
+    pub async fn get_schema(&self) -> Result<Value> {
+        self.rpc_call("get_schema", json!(["Open_vSwitch"])).await
+    }
+
+    /// Dump entire Open_vSwitch database: table -> rows (JSON)
+    #[allow(dead_code)]
+    pub async fn dump_open_vswitch(&self) -> Result<Value> {
+        // Discover tables from schema
+        let schema = self.get_schema().await?;
+        let tables = schema
+            .get("tables")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow::anyhow!("Invalid OVSDB schema: missing tables"))?;
+
+        // Build select ops for all tables
+        let mut ops = Vec::new();
+        let mut order = Vec::new();
+        for (name, _def) in tables.iter() {
+            ops.push(json!({
+                "op": "select",
+                "table": name,
+                "where": []
+            }));
+            order.push(name.clone());
+        }
+
+        let result = self.transact(json!(ops)).await?;
+
+        // Assemble into object
+        let mut out = serde_json::Map::new();
+        for (i, name) in order.into_iter().enumerate() {
+            let rows = result
+                .get(i)
+                .and_then(|r| r.get("rows"))
+                .cloned()
+                .unwrap_or_else(|| json!([]));
+            out.insert(name, rows);
+        }
+
+        Ok(Value::Object(out))
+    }
+
+    /// Transact - execute OVSDB operations
+    pub async fn transact(&self, operations: Value) -> Result<Value> {
+        let mut params = vec![json!("Open_vSwitch")];
+        if let Some(ops_array) = operations.as_array() {
+            for op in ops_array {
+                params.push(op.clone());
+            }
+        }
+        self.rpc_call("transact", json!(params)).await
+    }
+
+    /// Create OVS bridge
+    pub async fn create_bridge(&self, bridge_name: &str) -> Result<()> {
+        // Skip initialization check to avoid timeout - OVSDB should already be initialized
+        // self.ensure_initialized().await?;
+
+        // Check if bridge already exists
+        if self.bridge_exists(bridge_name).await? {
+            log::info!("Bridge {} already exists, skipping creation", bridge_name);
+            return Ok(());
+        }
+
+        // Generate temporary names for OVSDB row references
+        // Note: uuid-name is just an identifier string, not an actual UUID
+        // Using simple alphanumeric names without dashes
+        let bridge_ref = format!(
+            "row{}",
+            bridge_name
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        );
+
+        // Simplified bridge creation - just insert into Bridge table
+        // The kernel will create the associated Port and Interface automatically
+        // Note: OVSDB requires maps to be ["map", [...]], not {}
+        let operations = json!([
+            {
+                "op": "insert",
+                "table": "Bridge",
+                "uuid-name": bridge_ref,
+                "row": {
+                    "name": bridge_name,
+                    "datapath_type": "system",
+                    "stp_enable": false,
+                    "other_config": ["map", []],
+                    "external_ids": ["map", []]
+                }
+            },
+            {
+                "op": "mutate",
+                "table": "Open_vSwitch",
+                "where": [],
+                "mutations": [
+                    ["bridges", "insert", ["set", [["named-uuid", bridge_ref]]]]
+                ]
+            }
+        ]);
+
+        self.transact(operations).await?;
+
+        // Verify bridge was created and persisted
+        if self.bridge_exists(bridge_name).await? {
+            log::info!("Bridge {} successfully created and persisted", bridge_name);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Bridge {} creation failed - not found after creation",
+                bridge_name
+            ))
+        }
+    }
+
+    /// Add port to bridge
+    pub async fn add_port(&self, bridge_name: &str, port_name: &str) -> Result<()> {
+        // First, find the bridge UUID
+        let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
+
+        let port_uuid = format!("port-{}", port_name);
+        let iface_uuid = format!("iface-{}", port_name);
+
+        let operations = json!([
+            {
+                "op": "insert",
+                "table": "Port",
+                "row": {
+                    "name": port_name,
+                    "interfaces": ["set", [["named-uuid", iface_uuid]]]
+                },
+                "uuid-name": port_uuid
+            },
+            {
+                "op": "insert",
+                "table": "Interface",
+                "row": {
+                    "name": port_name
+                },
+                "uuid-name": iface_uuid
+            },
+            {
+                "op": "mutate",
+                "table": "Bridge",
+                "where": [["_uuid", "==", ["uuid", &bridge_uuid]]],
+                "mutations": [
+                    ["ports", "insert", ["set", [["named-uuid", port_uuid]]]]
+                ]
+            }
+        ]);
+
+        self.transact(operations).await?;
+        Ok(())
+    }
+
+    /// Delete bridge
+    pub async fn delete_bridge(&self, bridge_name: &str) -> Result<()> {
+        let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
+
+        let operations = json!([
+            {
+                "op": "mutate",
+                "table": "Open_vSwitch",
+                "where": [],
+                "mutations": [
+                    ["bridges", "delete", ["uuid", &bridge_uuid]]
+                ]
+            },
+            {
+                "op": "delete",
+                "table": "Bridge",
+                "where": [["_uuid", "==", ["uuid", &bridge_uuid]]]
+            }
+        ]);
+
+        self.transact(operations).await?;
+        Ok(())
+    }
+
+    /// Check if bridge exists
+    pub async fn bridge_exists(&self, bridge_name: &str) -> Result<bool> {
+        match self.find_bridge_uuid(bridge_name).await {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Find bridge UUID by name
+    async fn find_bridge_uuid(&self, bridge_name: &str) -> Result<String> {
+        let operations = json!([{
+            "op": "select",
+            "table": "Bridge",
+            "where": [["name", "==", bridge_name]],
+            "columns": ["_uuid"]
+        }]);
+
+        let result = self.transact(operations).await?;
+
+        if let Some(rows) = result[0]["rows"].as_array() {
+            if let Some(first_row) = rows.first() {
+                if let Some(uuid_array) = first_row["_uuid"].as_array() {
+                    if uuid_array.len() == 2 && uuid_array[0] == "uuid" {
+                        return Ok(uuid_array[1].as_str().unwrap().to_string());
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Bridge '{}' not found", bridge_name))
+    }
+
+    /// List all bridges
+    pub async fn list_bridges(&self) -> Result<Vec<String>> {
+        let operations = json!([{
+            "op": "select",
+            "table": "Bridge",
+            "where": [],
+            "columns": ["name"]
+        }]);
+
+        let result = self.transact(operations).await?;
+
+        let mut bridges = Vec::new();
+        if let Some(rows) = result[0]["rows"].as_array() {
+            for row in rows {
+                if let Some(name) = row["name"].as_str() {
+                    bridges.push(name.to_string());
+                }
+            }
+        }
+
+        Ok(bridges)
+    }
+
+    /// List ports on bridge
+    pub async fn list_bridge_ports(&self, bridge_name: &str) -> Result<Vec<String>> {
+        let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
+
+        // Get the bridge with its ports
+        let operations = json!([{
+            "op": "select",
+            "table": "Bridge",
+            "where": [["_uuid", "==", ["uuid", &bridge_uuid]]],
+            "columns": ["ports"]
+        }]);
+
+        let result = self.transact(operations).await?;
+
+        let mut port_uuids = Vec::new();
+        if let Some(rows) = result[0]["rows"].as_array() {
+            if let Some(first_row) = rows.first() {
+                if let Some(ports) = first_row["ports"].as_array() {
+                    if ports.len() == 2 && ports[0] == "set" {
+                        if let Some(port_set) = ports[1].as_array() {
+                            for port in port_set {
+                                if let Some(uuid_array) = port.as_array() {
+                                    if uuid_array.len() == 2 && uuid_array[0] == "uuid" {
+                                        port_uuids
+                                            .push(uuid_array[1].as_str().unwrap().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now get port names
+        let mut port_names = Vec::new();
+        for port_uuid in port_uuids {
+            let operations = json!([{
+                "op": "select",
+                "table": "Port",
+                "where": [["_uuid", "==", ["uuid", &port_uuid]]],
+                "columns": ["name"]
+            }]);
+
+            let result = self.transact(operations).await?;
+            if let Some(rows) = result[0]["rows"].as_array() {
+                if let Some(first_row) = rows.first() {
+                    if let Some(name) = first_row["name"].as_str() {
+                        port_names.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(port_names)
+    }
+
+    /// Get bridge info
+    pub async fn get_bridge_info(&self, bridge_name: &str) -> Result<String> {
+        let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
+
+        let operations = json!([{
+            "op": "select",
+            "table": "Bridge",
+            "where": [["_uuid", "==", ["uuid", &bridge_uuid]]],
+            "columns": []
+        }]);
+
+        let result = self.transact(operations).await?;
+        Ok(serde_json::to_string_pretty(&result[0]["rows"][0])?)
+    }
+
+    /// Set interface type
+    #[allow(dead_code)]
+    pub async fn set_interface_type(
+        &self,
+        interface_name: &str,
+        interface_type: &str,
+    ) -> Result<()> {
+        let operations = json!([
+            {
+                "op": "update",
+                "table": "Interface",
+                "where": [["name", "==", interface_name]],
+                "row": {
+                    "type": interface_type
+                }
+            }
+        ]);
+
+        let result = self.transact(operations).await?;
+        // Check for errors in the response
+        if let Some(errors) = result.as_array() {
+            for error in errors {
+                if error.get("error").is_some() {
+                    return Err(anyhow::anyhow!("OVSDB transaction failed: {:?}", error));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Set bridge property (datapath_type, fail_mode, etc.)
+    pub async fn set_bridge_property(
+        &self,
+        bridge_name: &str,
+        property: &str,
+        value: &str,
+    ) -> Result<()> {
+        // Build the row update based on property type
+        let row = match property {
+            "datapath_type" => json!({ "datapath_type": value }),
+            "fail_mode" => json!({ "fail_mode": value }),
+            "stp_enable" => json!({ "stp_enable": value == "true" }),
+            "mcast_snooping_enable" => json!({ "mcast_snooping_enable": value == "true" }),
+            _ => return Err(anyhow::anyhow!("Unknown bridge property: {}", property)),
+        };
+
+        let operations = json!([
+            {
+                "op": "update",
+                "table": "Bridge",
+                "where": [["name", "==", bridge_name]],
+                "row": row
+            }
+        ]);
+
+        let result = self.transact(operations).await?;
+
+        // Check for errors in the response
+        if let Some(errors) = result.as_array() {
+            for error in errors {
+                if error.get("error").is_some() {
+                    return Err(anyhow::anyhow!("OVSDB transaction failed: {:?}", error));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete a port from a bridge
+    pub async fn delete_port(&self, bridge_name: &str, port_name: &str) -> Result<()> {
+        // First, get the port UUID
+        let select_port = json!([{
+            "op": "select",
+            "table": "Port",
+            "where": [["name", "==", port_name]],
+            "columns": ["_uuid"]
+        }]);
+
+        let port_result = self.transact(select_port).await?;
+        let port_uuid = port_result[0]["rows"][0]["_uuid"][1]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Port '{}' not found", port_name))?
+            .to_string();
+
+        // Get current bridge ports
+        let select_bridge = json!([{
+            "op": "select",
+            "table": "Bridge",
+            "where": [["name", "==", bridge_name]],
+            "columns": ["_uuid", "ports"]
+        }]);
+
+        let bridge_result = self.transact(select_bridge).await?;
+        let bridge_uuid = bridge_result[0]["rows"][0]["_uuid"][1]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Bridge '{}' not found", bridge_name))?
+            .to_string();
+
+        // Remove port from bridge and delete port/interface
+        let operations = json!([
+            {
+                "op": "mutate",
+                "table": "Bridge",
+                "where": [["_uuid", "==", ["uuid", bridge_uuid]]],
+                "mutations": [["ports", "delete", ["uuid", port_uuid]]]
+            },
+            {
+                "op": "delete",
+                "table": "Port",
+                "where": [["_uuid", "==", ["uuid", port_uuid]]]
+            },
+            {
+                "op": "delete",
+                "table": "Interface",
+                "where": [["name", "==", port_name]]
+            }
+        ]);
+
+        let result = self.transact(operations).await?;
+
+        // Check for errors
+        if let Some(errors) = result.as_array() {
+            for error in errors {
+                if error.get("error").is_some() {
+                    return Err(anyhow::anyhow!("Failed to delete port: {:?}", error));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for OvsdbClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}

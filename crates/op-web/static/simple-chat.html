@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP AI Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 900px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            height: 90vh;
+            max-height: 800px;
+        }
+
+        .header {
+            padding: 20px;
+            border-bottom: 1px solid #e0e0e0;
+            background: #f8f9fa;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        label {
+            font-size: 14px;
+            color: #666;
+            font-weight: 500;
+        }
+
+        select, input {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            max-width: 85%;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: #667eea;
+            color: white;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .message.error {
+            align-self: flex-start;
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .message.loading {
+            align-self: flex-start;
+            background: #f0f0f0;
+            color: #999;
+            font-style: italic;
+        }
+
+        .input-area {
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+        }
+
+        textarea {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: none;
+            max-height: 120px;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        button {
+            padding: 12px 24px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #5568d3;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .status {
+            font-size: 12px;
+            color: #999;
+            padding: 0 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 MCP AI Chat</h1>
+            <div class="controls">
+                <div class="control-group">
+                    <label for="provider">Provider:</label>
+                    <select id="provider">
+                        <option value="ollama">Ollama (Local)</option>
+                        <option value="huggingface">HuggingFace</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="grok">Grok/xAI</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="model">Model:</label>
+                    <select id="model">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <span class="status" id="status">Ready</span>
+            </div>
+        </div>
+
+        <div class="messages" id="messages">
+            <div class="message assistant">
+                Welcome! I'm your AI assistant. Ask me anything or let me help with system tasks.
+            </div>
+        </div>
+
+        <div class="input-area">
+            <textarea id="input" placeholder="Type your message..." rows="1"></textarea>
+            <button id="send">Send</button>
+        </div>
+    </div>
+
+    <script>
+        const messagesEl = document.getElementById('messages');
+        const inputEl = document.getElementById('input');
+        const sendBtn = document.getElementById('send');
+        const providerEl = document.getElementById('provider');
+        const modelEl = document.getElementById('model');
+        const statusEl = document.getElementById('status');
+
+        // Load models when page loads or provider changes
+        async function loadModels() {
+            try {
+                const response = await fetch('/api/models');
+                const data = await response.json();
+
+                if (data.success && data.data) {
+                    const models = data.data[providerEl.value] || [];
+                    modelEl.innerHTML = models.map(m =>
+                        `<option value="${m.id}">${m.name}</option>`
+                    ).join('');
+                }
+            } catch (e) {
+                console.error('Failed to load models:', e);
+            }
+        }
+
+        // Send message
+        async function sendMessage() {
+            const message = inputEl.value.trim();
+            if (!message) return;
+
+            // Add user message
+            addMessage('user', message);
+            inputEl.value = '';
+            inputEl.style.height = 'auto';
+            sendBtn.disabled = true;
+            statusEl.textContent = 'Sending...';
+
+            // Add loading indicator
+            addMessage('loading', 'AI is thinking...');
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message }),
+                });
+
+                const data = await response.json();
+
+                // Remove loading message
+                const lastMsg = messagesEl.lastElementChild;
+                if (lastMsg && lastMsg.classList.contains('loading')) {
+                    lastMsg.remove();
+                }
+
+                if (data.success) {
+                    addMessage('assistant', data.data.message);
+                    statusEl.textContent = `${data.data.provider} | ${data.data.model}`;
+                } else {
+                    addMessage('error', `Error: ${data.error || 'Unknown error'}`);
+                    statusEl.textContent = 'Error';
+                }
+            } catch (e) {
+                // Remove loading message
+                const lastMsg = messagesEl.lastElementChild;
+                if (lastMsg && lastMsg.classList.contains('loading')) {
+                    lastMsg.remove();
+                }
+
+                addMessage('error', `Network error: ${e.message}`);
+                statusEl.textContent = 'Error';
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        function addMessage(role, content) {
+            const msgEl = document.createElement('div');
+            msgEl.className = `message ${role}`;
+            msgEl.textContent = content;
+            messagesEl.appendChild(msgEl);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        inputEl.addEventListener('input', () => {
+            inputEl.style.height = 'auto';
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+        });
+
+        providerEl.addEventListener('change', async () => {
+            await fetch('/api/provider/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ providerId: providerEl.value }),
+            });
+            loadModels();
+        });
+
+        modelEl.addEventListener('change', async () => {
+            if (!modelEl.value) return;
+            await fetch('/api/models/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ modelId: modelEl.value }),
+            });
+        });
+
+        // Initialize
+        loadModels();
+        inputEl.focus();
+    </script>
+</body>
+</html>

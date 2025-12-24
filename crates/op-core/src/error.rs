@@ -1,101 +1,95 @@
-//! Error types for op-dbus-v2 system
+//! Error types for op-dbus-v2
 
 use thiserror::Error;
 
-/// Core error type
+/// Main error type for op-dbus operations
 #[derive(Error, Debug)]
-pub enum CoreError {
-    #[error("Tool not found: {name}")]
-    ToolNotFound { name: String },
-    
-    #[error("D-Bus error: {message}")]
-    DbusError { message: String },
-    
-    #[error("Invalid input: {message}")]
-    InvalidInput { message: String },
-    
-    #[error("Execution error: {message}")]
-    ExecutionError { message: String },
-    
-    #[error("Configuration error: {message}")]
-    ConfigurationError { message: String },
-    
-    #[error("Network error: {message}")]
-    NetworkError { message: String },
-    
-    #[error("Permission denied: {operation}")]
-    PermissionDenied { operation: String },
-    
-    #[error("Timeout: {operation}")]
-    Timeout { operation: String },
-    
-    #[error("Serialization error: {source}")]
-    SerializationError { source: serde_json::Error },
-    
-    #[error("Internal error: {message}")]
-    Internal { message: String },
+pub enum Error {
+    #[error("DBus error: {0}")]
+    Dbus(#[from] zbus::Error),
+
+    #[error("DBus FDO error: {0}")]
+    DbusFdo(#[from] zbus::fdo::Error),
+
+    #[error("Connection error: {0}")]
+    Connection(String),
+
+    #[error("Introspection error: {0}")]
+    Introspection(String),
+
+    #[error("Tool execution error: {0}")]
+    ToolExecution(String),
+
+    #[error("Plugin error: {0}")]
+    Plugin(String),
+
+    #[error("Agent error: {0}")]
+    Agent(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
-impl CoreError {
-    /// Create a tool not found error
-    pub fn tool_not_found(name: impl Into<String>) -> Self {
-        Self::ToolNotFound { name: name.into() }
+/// Result type alias using our Error type
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Create a connection error
+    pub fn connection(msg: impl Into<String>) -> Self {
+        Error::Connection(msg.into())
     }
-    
-    /// Create a D-Bus error
-    pub fn dbus_error(message: impl Into<String>) -> Self {
-        Self::DbusError { message: message.into() }
+
+    /// Create an introspection error
+    pub fn introspection(msg: impl Into<String>) -> Self {
+        Error::Introspection(msg.into())
     }
-    
-    /// Create an invalid input error
-    pub fn invalid_input(message: impl Into<String>) -> Self {
-        Self::InvalidInput { message: message.into() }
+
+    /// Create a tool execution error
+    pub fn tool_execution(msg: impl Into<String>) -> Self {
+        Error::ToolExecution(msg.into())
     }
-    
-    /// Create an execution error
-    pub fn execution_error(message: impl Into<String>) -> Self {
-        Self::ExecutionError { message: message.into() }
+
+    /// Create a plugin error
+    pub fn plugin(msg: impl Into<String>) -> Self {
+        Error::Plugin(msg.into())
     }
-    
-    /// Create a configuration error
-    pub fn configuration_error(message: impl Into<String>) -> Self {
-        Self::ConfigurationError { message: message.into() }
+
+    /// Create an agent error
+    pub fn agent(msg: impl Into<String>) -> Self {
+        Error::Agent(msg.into())
     }
-    
-    /// Create a network error
-    pub fn network_error(message: impl Into<String>) -> Self {
-        Self::NetworkError { message: message.into() }
+
+    /// Create a not found error
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Error::NotFound(msg.into())
     }
-    
-    /// Create a permission denied error
-    pub fn permission_denied(operation: impl Into<String>) -> Self {
-        Self::PermissionDenied { operation: operation.into() }
-    }
-    
-    /// Create a timeout error
-    pub fn timeout(operation: impl Into<String>) -> Self {
-        Self::Timeout { operation: operation.into() }
-    }
-    
+
     /// Create an internal error
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::Internal { message: message.into() }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Error::Internal(msg.into())
     }
 }
 
-/// Result type alias
-pub type Result<T> = std::result::Result<T, CoreError>;
-
-impl From<serde_json::Error> for CoreError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::SerializationError { source: error }
-    }
-}
-
-impl From<anyhow::Error> for CoreError {
-    fn from(error: anyhow::Error) -> Self {
-        Self::Internal {
-            message: error.to_string(),
-        }
+impl From<anyhow::Error> for Error {
+    fn from(err: anyhow::Error) -> Self {
+        Error::Internal(err.to_string())
     }
 }

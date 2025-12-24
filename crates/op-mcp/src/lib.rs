@@ -1,11 +1,14 @@
-//! op-mcp: Minimal MCP Protocol Adapter
+//! op-mcp: MCP Protocol Adapter
 //!
-//! This crate provides a thin adapter that exposes op-dbus-v2 functionality via the
-//! Model Context Protocol (MCP). It delegates all intelligence to op-chat.
+//! This crate provides a thin adapter that exposes op-chat functionality via the
+//! Model Context Protocol (MCP). It delegates all intelligence to:
+//! - op-chat (orchestration)
+//! - op-tools (tool system)
+//! - op-introspection (D-Bus discovery)
 //!
 //! Architecture:
 //! stdin → MCP JSON-RPC → ChatActorHandle → stdout
-//!
+//! 
 //! Methods:
 //! - initialize → handshake
 //! - tools/list → chat.list_tools()

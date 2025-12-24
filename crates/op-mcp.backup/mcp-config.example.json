@@ -1,0 +1,43 @@
+[
+  {
+    "name": "filesystem",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    "env": {},
+    "auth_method": "none"
+  },
+  {
+    "name": "github",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "api_key": "ghp_your_github_token_here",
+    "api_key_env": "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "auth_method": "env_var"
+  },
+  {
+    "name": "postgres",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"],
+    "env": {},
+    "auth_method": "none"
+  },
+  {
+    "name": "anthropic-example",
+    "command": "mcp-server-anthropic",
+    "args": [],
+    "api_key": "sk-ant-your-api-key-here",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "auth_method": "env_var"
+  },
+  {
+    "name": "openai-example",
+    "command": "mcp-server-openai",
+    "args": [],
+    "api_key": "sk-your-openai-key",
+    "api_key_env": "OPENAI_API_KEY",
+    "auth_method": "bearer_token",
+    "headers": {
+      "Authorization": "Bearer sk-your-openai-key"
+    }
+  }
+]

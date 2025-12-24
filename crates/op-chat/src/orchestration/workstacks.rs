@@ -329,23 +329,22 @@ impl WorkstackRegistry {
 
     /// Register default workstacks
     fn register_default_workstacks(&mut self) {
-        // System setup workstack
+        // OVS Network Setup workstack
         self.register(
             Workstack::new(
-                "system_setup",
-                "System Setup",
-                "Complete system setup and verification",
+                "ovs_network_setup",
+                "OVS Network Setup",
+                "Set up OVS bridge with ports and flows",
             )
-            .with_category("system")
             .with_phase(WorkstackPhase {
                 id: "verify".to_string(),
-                name: "System Verification".to_string(),
-                description: "Verify system configuration and status".to_string(),
+                name: "Verify Setup".to_string(),
+                description: "Verify the bridge configuration".to_string(),
                 tools: vec![
                     PhaseToolCall {
-                        tool: "system_info".to_string(),
-                        arguments: json!({ "info_type": "all" }),
-                        store_as: Some("system_status".to_string()),
+                        tool: "ovs_list_bridges".to_string(),
+                        arguments: json!({}),
+                        store_as: Some("final_bridges".to_string()),
                         retries: 0,
                     },
                 ],
@@ -355,118 +354,6 @@ impl WorkstackRegistry {
                 rollback: vec![],
                 continue_on_failure: false,
                 timeout_secs: 30,
-                status: PhaseStatus::Pending,
-                result: None,
-                error: None,
-            })
-            .with_phase(WorkstackPhase {
-                id: "configure".to_string(),
-                name: "System Configuration".to_string(),
-                description: "Configure system parameters".to_string(),
-                tools: vec![
-                    PhaseToolCall {
-                        tool: "file_op".to_string(),
-                        arguments: json!({
-                            "operation": "write",
-                            "path": "/tmp/system_config.json",
-                            "content": "System configured successfully"
-                        }),
-                        store_as: None,
-                        retries: 0,
-                    },
-                ],
-                agents: vec![],
-                depends_on: vec!["verify".to_string()],
-                condition: None,
-                rollback: vec![],
-                continue_on_failure: false,
-                timeout_secs: 60,
-                status: PhaseStatus::Pending,
-                result: None,
-                error: None,
-            })
-        );
-
-        // Development workflow workstack
-        self.register(
-            Workstack::new(
-                "dev_workflow",
-                "Development Workflow",
-                "Complete development workflow from planning to deployment",
-            )
-            .with_category("development")
-            .with_skill("tdd_workflow")
-            .with_skill("documentation")
-            .with_phase(WorkstackPhase {
-                id: "plan".to_string(),
-                name: "Planning Phase".to_string(),
-                description: "Plan the development task".to_string(),
-                tools: vec![
-                    PhaseToolCall {
-                        tool: "calculate".to_string(),
-                        arguments: json!({
-                            "operation": "add",
-                            "a": 1,
-                            "b": 1
-                        }),
-                        store_as: Some("planning_result".to_string()),
-                        retries: 0,
-                    },
-                ],
-                agents: vec![],
-                depends_on: vec![],
-                condition: None,
-                rollback: vec![],
-                continue_on_failure: false,
-                timeout_secs: 30,
-                status: PhaseStatus::Pending,
-                result: None,
-                error: None,
-            })
-            .with_phase(WorkstackPhase {
-                id: "develop".to_string(),
-                name: "Development Phase".to_string(),
-                description: "Implement the solution".to_string(),
-                tools: vec![
-                    PhaseToolCall {
-                        tool: "echo".to_string(),
-                        arguments: json!({
-                            "text": "Development phase - implementing solution"
-                        }),
-                        store_as: None,
-                        retries: 0,
-                    },
-                ],
-                agents: vec![],
-                depends_on: vec!["plan".to_string()],
-                condition: None,
-                rollback: vec![],
-                continue_on_failure: false,
-                timeout_secs: 300,
-                status: PhaseStatus::Pending,
-                result: None,
-                error: None,
-            })
-            .with_phase(WorkstackPhase {
-                id: "test".to_string(),
-                name: "Testing Phase".to_string(),
-                description: "Test the implementation".to_string(),
-                tools: vec![
-                    PhaseToolCall {
-                        tool: "echo".to_string(),
-                        arguments: json!({
-                            "text": "Testing phase - running tests"
-                        }),
-                        store_as: None,
-                        retries: 0,
-                    },
-                ],
-                agents: vec![],
-                depends_on: vec!["develop".to_string()],
-                condition: None,
-                rollback: vec![],
-                continue_on_failure: false,
-                timeout_secs: 120,
                 status: PhaseStatus::Pending,
                 result: None,
                 error: None,
@@ -721,7 +608,6 @@ mod tests {
     fn test_registry_defaults() {
         let registry = WorkstackRegistry::with_defaults();
         
-        assert!(registry.get("system_setup").is_some());
-        assert!(registry.get("dev_workflow").is_some());
+        assert!(registry.get("ovs_network_setup").is_some());
     }
 }

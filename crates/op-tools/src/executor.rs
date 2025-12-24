@@ -1,187 +1,150 @@
-//! Tool execution engine with middleware support
+//! Tool executor with timeout and concurrency control
 
-use op_core::{Tool, ToolRequest, ToolResult};
 use std::sync::Arc;
-use tracing::{info, warn, instrument};
-use uuid::Uuid;
-use chrono::Utc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
+use tracing::{debug, info, warn};
 
-/// Tool executor trait
-#[async_trait::async_trait]
-pub trait ToolExecutor: Send + Sync {
-    /// Execute a tool with the given request
-    async fn execute(&self, tool: Arc<dyn Tool>, request: ToolRequest) -> ToolResult;
-}
+use crate::ToolRegistry;
+use op_core::{ToolRequest, ToolResult};
 
-/// Tool executor implementation with middleware support
-pub struct ToolExecutorImpl {
-    middleware: Vec<Arc<dyn ToolMiddleware>>,
-}
-
-impl ToolExecutorImpl {
-    /// Create a new tool executor
-    pub fn new(middleware: Vec<Arc<dyn ToolMiddleware>>) -> Self {
-        Self { middleware }
-    }
-
-    /// Execute a tool through the middleware chain
-    async fn execute_with_middleware(&self, tool: Arc<dyn Tool>, request: ToolRequest) -> ToolResult {
-        let start_time = Utc::now();
-        let execution_id = Uuid::new_v4();
-        
-        info!("Starting tool execution: {} (ID: {})", tool.definition().name, execution_id);
-
-        // Create the execution context
-        let context = ExecutionContext {
-            execution_id,
-            tool_name: tool.definition().name.clone(),
-            start_time,
-            middleware: self.middleware.clone(),
-        };
-
-        // Execute through middleware chain
-        let result = self.execute_middleware_chain(context, tool, request).await;
-        
-        let duration = Utc::now().signed_duration_since(start_time);
-        let duration_ms = duration.num_milliseconds() as u64;
-        
-        let final_result = ToolResult {
-            duration_ms,
-            ..result
-        };
-        
-        info!("Tool execution completed: {} (ID: {}, duration: {}ms, success: {})", 
-              tool.definition().name, execution_id, duration_ms, final_result.success);
-        
-        final_result
-    }
-
-    /// Execute through the middleware chain
-    async fn execute_middleware_chain(
-        &self,
-        mut context: ExecutionContext,
-        tool: Arc<dyn Tool>,
-        request: ToolRequest,
-    ) -> ToolResult {
-        // Apply pre-execution middleware
-        for middleware in &context.middleware {
-            if let Some(result) = middleware.before_execute(&context, &request).await {
-                return result;
-            }
-        }
-
-        // Execute the actual tool
-        let result = tool.execute(request).await;
-
-        // Apply post-execution middleware
-        let mut final_result = result;
-        for middleware in &context.middleware {
-            final_result = middleware.after_execute(&context, final_result).await;
-        }
-
-        final_result
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolExecutor for ToolExecutorImpl {
-    async fn execute(&self, tool: Arc<dyn Tool>, request: ToolRequest) -> ToolResult {
-        self.execute_with_middleware(tool, request).await
-    }
-}
-
-/// Execution context for middleware
-#[derive(Clone)]
-pub struct ExecutionContext {
-    pub execution_id: Uuid,
-    pub tool_name: String,
-    pub start_time: chrono::DateTime<chrono::Utc>,
-    pub middleware: Vec<Arc<dyn ToolMiddleware>>,
-}
-
-/// Tool middleware trait for adding cross-cutting concerns
-#[async_trait::async_trait]
-pub trait ToolMiddleware: Send + Sync {
-    /// Called before tool execution
-    /// Return Some(result) to short-circuit execution
-    async fn before_execute(
-        &self,
-        context: &ExecutionContext,
-        request: &ToolRequest,
-    ) -> Option<ToolResult>;
-
-    /// Called after tool execution
-    async fn after_execute(
-        &self,
-        context: &ExecutionContext,
-        result: ToolResult,
-    ) -> ToolResult;
-}
-
-/// Simple tool executor without middleware
-pub struct SimpleToolExecutor;
-
-#[async_trait::async_trait]
-impl ToolExecutor for SimpleToolExecutor {
-    async fn execute(&self, tool: Arc<dyn Tool>, request: ToolRequest) -> ToolResult {
-        let start_time = Utc::now();
-        let result = tool.execute(request).await;
-        let duration = Utc::now().signed_duration_since(start_time);
-        
-        ToolResult {
-            duration_ms: duration.num_milliseconds() as u64,
-            ..result
-        }
-    }
-}
-
-/// Tool execution statistics
+/// Configuration for tool execution
 #[derive(Debug, Clone)]
-pub struct ExecutionStats {
-    pub total_executions: u64,
-    pub successful_executions: u64,
-    pub failed_executions: u64,
-    pub average_duration_ms: f64,
-    pub total_duration_ms: u64,
+pub struct ExecutorConfig {
+    /// Maximum concurrent tool executions
+    pub max_concurrent: usize,
+    /// Default timeout for tool execution (ms)
+    pub default_timeout_ms: u64,
+    /// Maximum timeout allowed (ms)
+    pub max_timeout_ms: u64,
 }
 
-impl Default for ExecutionStats {
+impl Default for ExecutorConfig {
     fn default() -> Self {
         Self {
-            total_executions: 0,
-            successful_executions: 0,
-            failed_executions: 0,
-            average_duration_ms: 0.0,
-            total_duration_ms: 0,
+            max_concurrent: 10,
+            default_timeout_ms: 30000,
+            max_timeout_ms: 300000, // 5 minutes
         }
     }
 }
 
-/// Tool execution result with additional metadata
-#[derive(Debug, Clone)]
-pub struct ToolExecutionResult {
-    pub result: ToolResult,
-    pub execution_id: Uuid,
-    pub tool_name: String,
-    pub start_time: chrono::DateTime<chrono::Utc>,
-    pub end_time: chrono::DateTime<chrono::Utc>,
+/// Tool executor with concurrency and timeout control
+pub struct ToolExecutor {
+    registry: ToolRegistry,
+    config: ExecutorConfig,
+    semaphore: Arc<Semaphore>,
 }
 
-impl ToolExecutionResult {
-    /// Create a new execution result
-    pub fn new(
-        result: ToolResult,
-        execution_id: Uuid,
-        tool_name: String,
-        start_time: chrono::DateTime<chrono::Utc>,
-        end_time: chrono::DateTime<chrono::Utc>,
-    ) -> Self {
+impl ToolExecutor {
+    /// Create a new tool executor
+    pub fn new(registry: ToolRegistry, config: ExecutorConfig) -> Self {
+        let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
         Self {
-            result,
-            execution_id,
-            tool_name,
-            start_time,
-            end_time,
+            registry,
+            config,
+            semaphore,
+        }
+    }
+
+    /// Create with default configuration
+    pub fn with_defaults(registry: ToolRegistry) -> Self {
+        Self::new(registry, ExecutorConfig::default())
+    }
+
+    /// Execute a tool with timeout
+    pub async fn execute(&self, request: ToolRequest) -> ToolResult {
+        let start = std::time::Instant::now();
+
+        // Determine timeout
+        let timeout_ms = request
+            .timeout_ms
+            .unwrap_or(self.config.default_timeout_ms)
+            .min(self.config.max_timeout_ms);
+
+        debug!(
+            "Executing tool '{}' with timeout {}ms",
+            request.tool_name, timeout_ms
+        );
+
+        // Acquire semaphore permit
+        let _permit = match self.semaphore.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return ToolResult::error(
+                    &request.id,
+                    "Executor shutdown",
+                    start.elapsed().as_millis() as u64,
+                );
+            }
+        };
+
+        // Execute with timeout
+        let duration = Duration::from_millis(timeout_ms);
+        debug!(
+            "About to call registry.execute for tool '{}' with timeout {}ms",
+            request.tool_name, timeout_ms
+        );
+        let timeout_result = timeout(duration, self.registry.execute(request.clone())).await;
+        debug!(
+            "Registry.execute completed for tool '{}' - success: {}",
+            request.tool_name,
+            timeout_result.is_ok()
+        );
+
+        match timeout_result {
+            Ok(result) => {
+                debug!(
+                    "Tool '{}' executed successfully in {}ms",
+                    request.tool_name,
+                    start.elapsed().as_millis()
+                );
+                result
+            }
+            Err(_) => {
+                warn!(
+                    "Tool '{}' timed out after {}ms",
+                    request.tool_name, timeout_ms
+                );
+                ToolResult::error(
+                    &request.id,
+                    format!("Tool execution timed out after {}ms", timeout_ms),
+                    start.elapsed().as_millis() as u64,
+                )
+            }
+        }
+    }
+
+    /// Execute multiple tools concurrently
+    pub async fn execute_batch(&self, requests: Vec<ToolRequest>) -> Vec<ToolResult> {
+        let futures: Vec<_> = requests.into_iter().map(|req| self.execute(req)).collect();
+
+        futures::future::join_all(futures).await
+    }
+
+    /// Get current concurrency usage
+    pub fn current_usage(&self) -> usize {
+        self.config.max_concurrent - self.semaphore.available_permits()
+    }
+
+    /// Get available permits
+    pub fn available(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+
+    /// Get registry reference
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+}
+
+impl Clone for ToolExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            config: self.config.clone(),
+            semaphore: Arc::clone(&self.semaphore),
         }
     }
 }

@@ -1,0 +1,209 @@
+//! Status Handler - Comprehensive system status
+
+use axum::{extract::State, response::Json};
+use serde::Serialize;
+use std::sync::Arc;
+use std::collections::HashMap;
+use sysinfo::System;
+
+use crate::state::AppState;
+
+#[derive(Serialize)]
+pub struct StatusResponse {
+    pub system: SystemInfo,
+    pub tools: ToolsInfo,
+    pub llm: LlmInfo,
+    pub agents: AgentsInfo,
+    pub services: Vec<ServiceStatus>,
+    pub network: NetworkInfo,
+}
+
+#[derive(Serialize)]
+pub struct SystemInfo {
+    pub hostname: String,
+    pub kernel: String,
+    pub uptime_secs: u64,
+    pub load_average: [f64; 3],
+    pub memory_total_mb: u64,
+    pub memory_used_mb: u64,
+    pub memory_percent: f64,
+    pub cpu_count: usize,
+    pub cpu_usage: f32,
+}
+
+#[derive(Serialize)]
+pub struct ToolsInfo {
+    pub total: usize,
+    pub by_category: HashMap<String, usize>,
+}
+
+#[derive(Serialize)]
+pub struct LlmInfo {
+    pub provider: String,
+    pub model: String,
+    pub available: bool,
+}
+
+#[derive(Serialize)]
+pub struct AgentsInfo {
+    pub types_available: usize,
+    pub instances_running: usize,
+}
+
+#[derive(Serialize)]
+pub struct ServiceStatus {
+    pub name: String,
+    pub status: String,
+}
+
+#[derive(Serialize)]
+pub struct NetworkInfo {
+    pub interfaces: Vec<InterfaceInfo>,
+}
+
+#[derive(Serialize)]
+pub struct InterfaceInfo {
+    pub name: String,
+    pub state: String,
+    pub mac_address: Option<String>,
+}
+
+/// GET /api/status - Comprehensive system status
+pub async fn status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<StatusResponse> {
+    // Get system info
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+    let kernel = System::kernel_version().unwrap_or_else(|| "unknown".to_string());
+
+    let load_avg = System::load_average();
+    let memory_total_mb = sys.total_memory() / 1024 / 1024;
+    let memory_used_mb = sys.used_memory() / 1024 / 1024;
+    let memory_percent = if memory_total_mb > 0 {
+        (memory_used_mb as f64 / memory_total_mb as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let cpu_usage = sys.global_cpu_info().cpu_usage();
+
+    let system = SystemInfo {
+        hostname,
+        kernel,
+        uptime_secs: state.uptime_secs(),
+        load_average: [load_avg.one, load_avg.five, load_avg.fifteen],
+        memory_total_mb,
+        memory_used_mb,
+        memory_percent,
+        cpu_count: sys.cpus().len(),
+        cpu_usage,
+    };
+
+    // Get tools info
+    let tools_list = state.tool_registry.list().await;
+    let mut by_category: HashMap<String, usize> = HashMap::new();
+    for tool in &tools_list {
+        let category = if tool.name.starts_with("ovs_") {
+            "ovs"
+        } else if tool.name.starts_with("systemd_") {
+            "systemd"
+        } else if tool.name.starts_with("nm_") {
+            "networkmanager"
+        } else if tool.name.starts_with("file_") {
+            "file"
+        } else if tool.name.starts_with("system_") {
+            "system"
+        } else if tool.name.starts_with("plugin_") {
+            "plugin"
+        } else {
+            "other"
+        };
+        *by_category.entry(category.to_string()).or_insert(0) += 1;
+    }
+
+    let tools = ToolsInfo {
+        total: tools_list.len(),
+        by_category,
+    };
+
+    // Get LLM info
+    let llm = LlmInfo {
+        provider: state.provider_name.clone(),
+        model: state.default_model.clone(),
+        available: true,
+    };
+
+    // Get agents info
+    let agent_types = op_agents::list_agent_types().len();
+    let agent_instances = state.agent_registry.read().await.list_instances().await.len();
+    let agents = AgentsInfo {
+        types_available: agent_types,
+        instances_running: agent_instances,
+    };
+
+    // Get key services status
+    let services = get_key_services().await;
+
+    // Get network interfaces
+    let network = get_network_info().await;
+
+    Json(StatusResponse {
+        system,
+        tools,
+        llm,
+        agents,
+        services,
+        network,
+    })
+}
+
+async fn get_key_services() -> Vec<ServiceStatus> {
+    let key_services = ["nginx", "docker", "sshd", "openvswitch-switch"];
+    let mut services = Vec::new();
+
+    for name in key_services {
+        // Try to get status via /sys/fs/cgroup or just mark as unknown
+        let status = "unknown".to_string();
+        services.push(ServiceStatus {
+            name: name.to_string(),
+            status,
+        });
+    }
+
+    services
+}
+
+async fn get_network_info() -> NetworkInfo {
+    let mut interfaces = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir("/sys/class/net").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            let state_path = format!("/sys/class/net/{}/operstate", name);
+            let state = tokio::fs::read_to_string(&state_path)
+                .await
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string();
+
+            let mac_path = format!("/sys/class/net/{}/address", name);
+            let mac_address = tokio::fs::read_to_string(&mac_path)
+                .await
+                .ok()
+                .map(|m| m.trim().to_string())
+                .filter(|m| m != "00:00:00:00:00:00");
+
+            interfaces.push(InterfaceInfo {
+                name,
+                state,
+                mac_address,
+            });
+        }
+    }
+
+    NetworkInfo { interfaces }
+}

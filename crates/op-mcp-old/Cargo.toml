@@ -1,0 +1,43 @@
+[package]
+name = "op-mcp-old"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Model Context Protocol: agents, tools, chat server, introspection, workflows (staging code)"
+
+[features]
+default = []
+web = []
+
+[dependencies]
+op-core = { path = "../op-core" }
+op-tools = { path = "../op-tools" }
+op-introspection = { path = "../op-introspection" }
+op-state = { path = "../op-state" }
+op-network = { path = "../op-network" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+zbus = { workspace = true }
+zbus_xml = { workspace = true }
+gethostname = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+futures = "0.3"
+uuid = { workspace = true }
+log = { workspace = true }
+sha2 = "0.10"
+quick-xml = { workspace = true }
+regex = { workspace = true }
+rusqlite = "0.32"
+base64 = { workspace = true }
+serde_yaml = "0.9"

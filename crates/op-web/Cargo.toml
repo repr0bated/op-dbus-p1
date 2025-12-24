@@ -1,0 +1,50 @@
+[package]
+name = "op-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Unified web server for op-dbus-v2 - consolidates all HTTP services"
+
+[[bin]]
+name = "op-web-server"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates
+op-core = { workspace = true }
+op-chat = { workspace = true }
+op-llm = { workspace = true }
+op-tools = { workspace = true }
+op-agents = { workspace = true }
+op-state = { workspace = true }
+op-network = { workspace = true }
+
+# Web framework
+axum = { workspace = true, features = ["ws", "macros"] }
+tokio = { workspace = true, features = ["full", "signal"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "fs", "compression-gzip", "trace", "timeout"] }
+hyper = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Async
+futures = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+
+# Utilities
+uuid = { workspace = true, features = ["v4"] }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# System info
+sysinfo = "0.30"
+gethostname = { workspace = true }
