@@ -2859,9 +2859,11 @@ dependencies = [
  "op-state",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-test",
  "tracing",
+ "uuid",
  "zbus",
 ]
 

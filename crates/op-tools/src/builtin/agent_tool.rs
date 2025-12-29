@@ -17,6 +17,8 @@ pub struct AgentTool {
     agent_name: String,
     description: String,
     operations: Vec<String>,
+    /// Role category for MCP splitting (language, infrastructure, database, etc.)
+    role_category: String,
     #[allow(dead_code)]
     config: Value,
     executor: Arc<dyn AgentExecutor + Send + Sync>,
@@ -48,6 +50,27 @@ impl AgentTool {
             agent_name: agent_name.to_string(),
             description: description.to_string(),
             operations: operations.to_vec(),
+            role_category: "agent".to_string(), // Default
+            config,
+            executor,
+        }
+    }
+
+    /// Create with specific role category for MCP splitting
+    pub fn with_category(
+        agent_name: &str,
+        description: &str,
+        operations: &[String],
+        role_category: &str,
+        config: Value,
+        executor: Arc<dyn AgentExecutor + Send + Sync>,
+    ) -> Self {
+        Self {
+            name: format!("agent_{}", agent_name.replace('-', "_")),
+            agent_name: agent_name.to_string(),
+            description: description.to_string(),
+            operations: operations.to_vec(),
+            role_category: role_category.to_string(),
             config,
             executor,
         }
@@ -139,7 +162,7 @@ impl Tool for AgentTool {
     }
 
     fn category(&self) -> &str {
-        "agent"
+        &self.role_category
     }
 
     fn namespace(&self) -> &str {
@@ -151,7 +174,11 @@ impl Tool for AgentTool {
     }
 
     fn tags(&self) -> Vec<String> {
-        vec!["agent".to_string(), self.agent_name.clone()]
+        vec![
+            "agent".to_string(),
+            self.role_category.clone(),
+            self.agent_name.clone(),
+        ]
     }
 }
 

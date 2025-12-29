@@ -16,12 +16,16 @@ serde_json = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
 
 # Time
 chrono = { workspace = true }
+
+# UUID for event IDs
+uuid = { workspace = true }
 
 # D-Bus for agent execution
 zbus = { workspace = true }
