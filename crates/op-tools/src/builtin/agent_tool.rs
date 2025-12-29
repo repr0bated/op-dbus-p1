@@ -266,11 +266,20 @@ impl AgentExecutor for DbusAgentExecutor {
         use zbus::Connection;
 
         // Build task JSON for the agent
+        // Convert args to string if present (agents expect args as string, not object)
+        let args_str = args.and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                Some(serde_json::to_string(&v).ok()?)
+            }
+        });
+
         let task = serde_json::json!({
             "type": agent_name.replace('_', "-"),
             "operation": operation,
             "path": path,
-            "args": args.unwrap_or(Value::Null)
+            "args": args_str
         });
 
         let task_json = serde_json::to_string(&task)?;
