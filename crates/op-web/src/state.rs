@@ -82,6 +82,29 @@ impl AppState {
         // Create chat manager for LLM access
         let chat_manager = Arc::new(ChatManager::new());
 
+        if let Some(provider) = read_persisted_provider().await {
+            match provider.parse() {
+                Ok(provider_type) => {
+                    if let Err(e) = chat_manager.switch_provider(provider_type).await {
+                        warn!("Failed to load persisted provider '{}': {}", provider, e);
+                    } else {
+                        info!("Loaded persisted provider: {}", provider);
+                    }
+                }
+                Err(e) => {
+                    warn!("Invalid persisted provider '{}': {}", provider, e);
+                }
+            }
+        }
+
+        if let Some(model) = read_persisted_model().await {
+            if let Err(e) = chat_manager.switch_model(model.clone()).await {
+                warn!("Failed to load persisted model '{}': {}", model, e);
+            } else {
+                info!("Loaded persisted model: {}", model);
+            }
+        }
+
         // Get LLM provider info
         let provider_type = chat_manager.current_provider().await;
         let default_model = chat_manager.current_model().await;
@@ -126,6 +149,37 @@ impl AppState {
     /// Get uptime in seconds
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+}
+
+const PERSISTED_MODEL_PATH: &str = "/etc/op-dbus/llm-model";
+const PERSISTED_PROVIDER_PATH: &str = "/etc/op-dbus/llm-provider";
+
+async fn read_persisted_model() -> Option<String> {
+    match tokio::fs::read_to_string(PERSISTED_MODEL_PATH).await {
+        Ok(contents) => {
+            let model = contents.trim().to_string();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model)
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+async fn read_persisted_provider() -> Option<String> {
+    match tokio::fs::read_to_string(PERSISTED_PROVIDER_PATH).await {
+        Ok(contents) => {
+            let provider = contents.trim().to_string();
+            if provider.is_empty() {
+                None
+            } else {
+                Some(provider)
+            }
+        }
+        Err(_) => None,
     }
 }
 

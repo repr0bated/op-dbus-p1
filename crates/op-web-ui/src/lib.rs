@@ -8,6 +8,7 @@
 
 use leptos::*;
 use leptos_router::*;
+use leptos_router::{BrowserIntegration, RouterIntegrationContext};
 
 mod api;
 mod components;
@@ -28,6 +29,7 @@ pub fn App() -> impl IntoView {
     // Create global application state
     let app_state = create_rw_signal(AppState::new());
     provide_context(app_state);
+    provide_context(RouterIntegrationContext::new(BrowserIntegration {}));
 
     view! {
         <Router>
@@ -37,6 +39,7 @@ pub fn App() -> impl IntoView {
                     <Route path="/" view=ChatPage/>
                     <Route path="/tools" view=ToolsPage/>
                     <Route path="/status" view=StatusPage/>
+                    <Route path="/models" view=ModelsPage/>
                     <Route path="/settings" view=SettingsPage/>
                 </Routes>
             </main>

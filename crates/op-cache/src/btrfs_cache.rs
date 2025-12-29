@@ -69,14 +69,34 @@ pub struct BtrfsCache {
 #[allow(dead_code)]
 impl BtrfsCache {
     /// Create BTRFS subvolume at specified path
-    /// Note: BTRFS subvolume creation is stubbed - using regular directories
-    /// This avoids dependency on nix crate which is forbidden
     async fn create_btrfs_subvolume(path: &Path) -> Result<()> {
-        // Just create regular directory instead of BTRFS subvolume
-        // Compression and snapshot features won't work, but basic caching will
-        tokio::fs::create_dir_all(path)
+        if path.exists() {
+            return Ok(());
+        }
+
+        let output = tokio::process::Command::new("btrfs")
+            .args(["subvolume", "create"])
+            .arg(path)
+            .output()
             .await
-            .context("Failed to create cache directory")
+            .context("Failed to execute btrfs command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("command not found") || stderr.contains("not a btrfs filesystem") {
+                warn!(
+                    "BTRFS not available, creating regular directory: {:?}",
+                    path
+                );
+                tokio::fs::create_dir_all(path)
+                    .await
+                    .context("Failed to create cache directory")?;
+            } else {
+                anyhow::bail!("btrfs subvolume create failed: {}", stderr);
+            }
+        }
+
+        Ok(())
     }
 
     /// Create new BTRFS cache with proper subvolumes
@@ -140,7 +160,8 @@ impl BtrfsCache {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(24),
-            prefix: "cache".to_string(),
+            prefix: std::env::var("OPDBUS_CACHE_SNAPSHOT_PREFIX")
+                .unwrap_or_else(|_| "SNP-cache".to_string()),
         };
 
         let snapshot_manager = SnapshotManager::new(cache_dir.clone(), snapshot_config);

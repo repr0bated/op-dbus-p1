@@ -130,9 +130,11 @@ pub async fn status_handler(
     };
 
     // Get LLM info
+    let provider = state.chat_manager.current_provider().await;
+    let model = state.chat_manager.current_model().await;
     let llm = LlmInfo {
-        provider: state.provider_name.clone(),
-        model: state.default_model.clone(),
+        provider: provider.to_string(),
+        model,
         available: true,
     };
 

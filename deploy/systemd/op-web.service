@@ -1,0 +1,59 @@
+[Unit]
+Description=op-dbus-v2 Web Server
+Documentation=https://github.com/your-repo/op-dbus-v2
+After=network-online.target dbus.service nginx.service
+Wants=network-online.target dbus.service
+Requires=dbus.socket
+
+[Service]
+Type=simple
+User=jeremy
+Group=jeremy
+WorkingDirectory=/home/jeremy/op-dbus-v2
+EnvironmentFile=/home/jeremy/.op-web.env
+
+# Main process
+ExecStart=/home/jeremy/op-dbus-v2/target/release/op-web-server
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+# Read-write paths
+ReadWritePaths=/var/cache/op-dbus
+ReadWritePaths=/tmp
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=512
+MemoryMax=2G
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=op-web
+
+# Watchdog (optional)
+WatchdogSec=60
+
+[Install]
+WantedBy=multi-user.target

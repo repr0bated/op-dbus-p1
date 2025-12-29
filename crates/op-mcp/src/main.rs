@@ -7,6 +7,7 @@
 use anyhow::Result;
 use op_chat::{ChatActor, ChatActorConfig};
 use op_mcp::{McpRequest, McpServer, ResourceRegistry};
+use op_tools::ToolRegistry;
 use tokio::io::BufReader;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -27,31 +28,62 @@ async fn main() -> Result<()> {
 
     info!("Starting op-mcp-server");
 
-    // Create ChatActor with default configuration
+    // Create tool registry and register tools
+    let tool_registry = Arc::new(ToolRegistry::new());
+    register_all_tools(&tool_registry).await?;
+
+    // Create ChatActor with configured registry
     let config = ChatActorConfig::default();
-    let (chat_actor, chat_handle) = ChatActor::new(config).await?;
+    let (chat_actor, chat_handle) = ChatActor::with_registry(config, tool_registry).await?;
     tokio::spawn(chat_actor.run());
 
     info!("ChatActor started, ready to handle MCP requests");
 
     // Create MCP server
-    let mcp_server = Arc::new(McpServer::new(chat_handle));
-
-    // Create resource registry (can be extended with actual docs)
+    // Create resource registry (dynamic prompts)
     let resource_registry = ResourceRegistry::new();
+    let mcp_server = Arc::new(McpServer::new(chat_handle, resource_registry));
 
     // Run the MCP protocol loop
-    run_mcp_protocol(mcp_server, resource_registry).await?;
+    run_mcp_protocol(mcp_server).await?;
 
     info!("op-mcp-server shutting down");
     Ok(())
 }
 
+async fn register_all_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
+    op_tools::register_builtin_tools(registry).await?;
+    register_agent_tools(registry).await?;
+    op_tools::builtin::register_shell_tools(registry).await?;
+    Ok(())
+}
+
+async fn register_agent_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
+    let descriptors = op_agents::builtin_agent_descriptors();
+    let mut count = 0usize;
+
+    for descriptor in descriptors {
+        let tool = op_tools::builtin::create_agent_tool(
+            &descriptor.agent_type,
+            &format!("{} - {}", descriptor.name, descriptor.description),
+            &descriptor.operations,
+            serde_json::json!({ "agent_type": descriptor.agent_type }),
+        )?;
+
+        if registry.get_definition(tool.name()).await.is_some() {
+            continue;
+        }
+
+        registry.register_tool(tool).await?;
+        count += 1;
+    }
+
+    info!("Registered {} agent tools", count);
+    Ok(())
+}
+
 /// Run the MCP protocol loop over stdio
-async fn run_mcp_protocol(
-    mcp_server: Arc<McpServer>,
-    _resource_registry: ResourceRegistry,
-) -> Result<()> {
+async fn run_mcp_protocol(mcp_server: Arc<McpServer>) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 

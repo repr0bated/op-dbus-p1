@@ -29,6 +29,7 @@ pub fn Header() -> impl IntoView {
                 <A href="/" class="nav-link">"💬 Chat"</A>
                 <A href="/tools" class="nav-link">"🔧 Tools"</A>
                 <A href="/status" class="nav-link">"📊 Status"</A>
+                <A href="/models" class="nav-link">"🧠 Models"</A>
                 <A href="/settings" class="nav-link">"⚙️ Settings"</A>
             </nav>
             <div class="header-info">

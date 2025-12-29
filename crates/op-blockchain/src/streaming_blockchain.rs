@@ -434,8 +434,9 @@ impl StreamingBlockchain {
         let snapshot_dir = self.base_path.join("snapshots");
         tokio::fs::create_dir_all(&snapshot_dir).await?;
 
-        // Create timestamp for state snapshots (more meaningful than block hash for DR)
-        let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let state_prefix = self.state_snapshot_prefix();
+        let state_counter = self.next_state_snapshot_counter(&snapshot_dir, &state_prefix).await?;
+        let state_snapshot_name = format!("{}-{:06}", state_prefix, state_counter);
 
         // Snapshot timing (audit trail - indexed by block hash)
         let timing_snapshot = snapshot_dir.join(format!("timing-{}", block_hash));
@@ -472,7 +473,7 @@ impl StreamingBlockchain {
         }
 
         // Snapshot state (current system state - indexed by timestamp for DR)
-        let state_snapshot = snapshot_dir.join(format!("state-{}", timestamp));
+        let state_snapshot = snapshot_dir.join(&state_snapshot_name);
         let state_result = Command::new("btrfs")
             .args(["subvolume", "snapshot", "-r"])
             .arg(&self.state_subvol)
@@ -487,7 +488,7 @@ impl StreamingBlockchain {
                 String::from_utf8_lossy(&state_result.stderr)
             );
         } else {
-            debug!("Created state snapshot: state-{}", timestamp);
+            debug!("Created state snapshot: {}", state_snapshot_name);
 
             // Prune old state snapshots according to retention policy
             if let Err(e) = self.prune_state_snapshots().await {
@@ -599,10 +600,11 @@ impl StreamingBlockchain {
 
     /// Prune state snapshots according to retention policy (rolling windows)
     async fn prune_state_snapshots(&self) -> Result<()> {
-        use chrono::{DateTime, Datelike, Duration, NaiveDateTime, Utc};
+        use chrono::{DateTime, Datelike, Duration, Utc};
         use std::collections::HashMap;
 
         let snapshot_dir = self.base_path.join("snapshots");
+        let state_prefix = self.state_snapshot_prefix();
 
         // List all state snapshots
         let mut entries = tokio::fs::read_dir(&snapshot_dir).await?;
@@ -612,16 +614,14 @@ impl StreamingBlockchain {
             let name = entry.file_name().to_string_lossy().to_string();
 
             // Only process state snapshots
-            if !name.starts_with("state-") {
+            if !Self::is_state_snapshot_name(&name, &state_prefix) {
                 continue;
             }
 
-            // Parse timestamp from filename: state-20250106-143022
-            if let Some(timestamp_str) = name.strip_prefix("state-") {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y%m%d-%H%M%S") {
-                    let dt_utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
-                    snapshots.push((name, dt_utc));
-                }
+            let metadata = tokio::fs::metadata(entry.path()).await?;
+            let ts = metadata.created().or_else(|_| metadata.modified()).ok();
+            if let Some(dt_utc) = ts.map(DateTime::<Utc>::from) {
+                snapshots.push((name, dt_utc));
             }
         }
 
@@ -743,29 +743,30 @@ impl StreamingBlockchain {
 
     /// List all available state snapshots for rollback
     pub async fn list_state_snapshots(&self) -> Result<Vec<(String, String)>> {
-        use chrono::{DateTime, NaiveDateTime, Utc};
+        use chrono::{DateTime, Utc};
 
         let snapshot_dir = self.base_path.join("snapshots");
         let mut entries = tokio::fs::read_dir(&snapshot_dir).await?;
         let mut snapshots = Vec::new();
+        let state_prefix = self.state_snapshot_prefix();
 
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name().to_string_lossy().to_string();
 
-            if !name.starts_with("state-") {
+            if !Self::is_state_snapshot_name(&name, &state_prefix) {
                 continue;
             }
 
-            if let Some(timestamp_str) = name.strip_prefix("state-") {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y%m%d-%H%M%S") {
-                    let dt_utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
-                    let human_readable = dt_utc.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-                    snapshots.push((name, human_readable));
-                }
-            }
+            let metadata = tokio::fs::metadata(entry.path()).await?;
+            let ts = metadata.created().or_else(|_| metadata.modified()).ok();
+            let human_readable = ts
+                .map(DateTime::<Utc>::from)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            snapshots.push((name, human_readable));
         }
 
-        // Sort by timestamp (newest first)
+        // Sort by name (newest counter first)
         snapshots.sort_by(|a, b| b.0.cmp(&a.0));
 
         Ok(snapshots)
@@ -787,5 +788,42 @@ impl StreamingBlockchain {
 
         info!("Rolling back to snapshot: {}", snapshot_name);
         Ok(state_file)
+    }
+
+    fn state_snapshot_prefix(&self) -> String {
+        std::env::var("OPDBUS_STATE_SNAPSHOT_PREFIX").unwrap_or_else(|_| "SNP-state".to_string())
+    }
+
+    async fn next_state_snapshot_counter(
+        &self,
+        snapshot_dir: &Path,
+        prefix: &str,
+    ) -> Result<u64> {
+        let mut entries = tokio::fs::read_dir(snapshot_dir).await?;
+        let name_prefix = format!("{}-", prefix);
+        let mut max_counter = 0u64;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&name_prefix) {
+                continue;
+            }
+            if let Some(counter_str) = name.strip_prefix(&name_prefix) {
+                if let Ok(counter) = counter_str.parse::<u64>() {
+                    if counter > max_counter {
+                        max_counter = counter;
+                    }
+                }
+            }
+        }
+
+        Ok(max_counter + 1)
+    }
+
+    fn is_state_snapshot_name(name: &str, prefix: &str) -> bool {
+        if name.starts_with(&format!("{}-", prefix)) {
+            return true;
+        }
+        name.starts_with("state-")
     }
 }

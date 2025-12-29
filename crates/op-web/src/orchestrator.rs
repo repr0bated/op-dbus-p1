@@ -99,6 +99,7 @@ pub struct UnifiedOrchestrator {
     session_manager: Arc<SessionManager>,
     chat_manager: Arc<ChatManager>,
     conversations: RwLock<HashMap<String, ConversationContext>>,
+    #[allow(dead_code)]
     default_model: String,
 }
 
@@ -175,6 +176,7 @@ impl UnifiedOrchestrator {
         let systemd_count = tools.iter().filter(|t| t.name.starts_with("systemd_")).count();
         let plugin_count = tools.iter().filter(|t| t.name.starts_with("plugin_")).count();
 
+        let model = self.chat_manager.current_model().await;
         OrchestratorResponse::success(format!(
             "📊 System Status\n\
             ═══════════════\n\
@@ -185,12 +187,12 @@ impl UnifiedOrchestrator {
             🤖 Model: {}\n\
             💬 Sessions: {}",
             tool_count, ovs_count, systemd_count, plugin_count,
-            self.default_model,
+            model,
             self.conversations.read().await.len()
         ))
         .with_data(json!({
             "tools": tool_count,
-            "model": self.default_model
+            "model": model
         }))
         .with_intent("status")
     }
@@ -276,11 +278,12 @@ impl UnifiedOrchestrator {
         };
 
         // Process through NL Admin
+        let model = self.chat_manager.current_model().await;
         match self
             .nl_admin
             .process(
                 self.chat_manager.as_ref(),
-                &self.default_model,
+                &model,
                 message,
                 history,
             )

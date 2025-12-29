@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::time::Duration;
 use anyhow::Result;
+use crate::ToolRegistry;
+use std::sync::Arc;
 
 /// Tool to test tool execution (no network ops)
 pub struct TestTool;
@@ -516,6 +518,19 @@ impl Tool for OvsListPortsTool {
             "port_count": ports.len()
         }))
     }
+}
+
+pub async fn register_ovs_tools(registry: &ToolRegistry) -> Result<()> {
+    registry.register_tool(Arc::new(OvsListBridgesTool)).await?;
+    registry.register_tool(Arc::new(OvsListPortsTool)).await?;
+    registry.register_tool(Arc::new(OvsCapabilitiesTool)).await?;
+    registry.register_tool(Arc::new(OvsCreateBridgeTool)).await?;
+    registry.register_tool(Arc::new(OvsDeleteBridgeTool)).await?;
+    registry.register_tool(Arc::new(OvsAddPortTool)).await?;
+    registry.register_tool(Arc::new(OvsListDatapathsTool)).await?;
+    registry.register_tool(Arc::new(OvsListVportsTool)).await?;
+    registry.register_tool(Arc::new(OvsDumpFlowsTool)).await?;
+    Ok(())
 }
 
 /// Tool to get detailed bridge info

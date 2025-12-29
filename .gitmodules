@@ -1,3 +1,6 @@
 [submodule "op-dbus-staging"]
 	path = op-dbus-staging
 	url = /home/jeremy/git/op-dbus-v2/op-dbus-staging/
+[submodule "chat-ui"]
+	path = chat-ui
+	url = https://github.com/huggingface/chat-ui.git

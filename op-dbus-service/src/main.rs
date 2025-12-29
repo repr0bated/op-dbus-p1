@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     // --- 2. Setup D-Bus ---
 
     let dbus_future = async {
-        let conn_builder = connection::Builder::session()?;
+        let conn_builder = connection::Builder::system()?;
         let conn_builder = conn_builder.name("org.op_dbus.Service")?;
         
         let conn_builder = conn_builder.serve_at("/org/op_dbus/Chat", ChatInterface::new(chat_handle.clone()))?;

@@ -55,7 +55,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // LLM endpoints
         .route("/llm/status", get(handlers::llm::llm_status_handler))
+        .route("/llm/providers", get(handlers::llm::list_providers_handler))
         .route("/llm/models", get(handlers::llm::list_models_handler))
+        .route("/llm/models/:provider", get(handlers::llm::list_models_for_provider_handler))
+        .route("/llm/provider", post(handlers::llm::switch_provider_handler))
         .route("/llm/model", post(handlers::llm::switch_model_handler))
         // MCP discovery endpoints
         .route("/mcp/_discover", get(mcp::discover_handler))

@@ -23,7 +23,7 @@ impl Default for SnapshotConfig {
         Self {
             snapshot_dir: PathBuf::from("/var/lib/op-dbus/@cache-snapshots"),
             max_snapshots: 24, // Keep 24 hourly snapshots = 1 day
-            prefix: "cache".to_string(),
+            prefix: "SNP-cache".to_string(),
         }
     }
 }
@@ -47,9 +47,8 @@ impl SnapshotManager {
         // Create snapshot directory if it doesn't exist
         tokio::fs::create_dir_all(&self.config.snapshot_dir).await?;
 
-        // Generate snapshot name with timestamp
-        let timestamp = chrono::Utc::now().format("%Y-%m-%d-%H:%M:%S");
-        let snapshot_name = format!("{}@{}", self.config.prefix, timestamp);
+        let snapshot_counter = self.next_snapshot_counter().await?;
+        let snapshot_name = format!("{}-{:06}", self.config.prefix, snapshot_counter);
         let snapshot_path = self.config.snapshot_dir.join(&snapshot_name);
 
         log::info!("Creating BTRFS snapshot: {}", snapshot_name);
@@ -91,27 +90,32 @@ impl SnapshotManager {
             let name_str = name.to_string_lossy();
 
             // Filter by prefix
-            if !name_str.starts_with(&format!("{}@", self.config.prefix)) {
+            let prefix = format!("{}-", self.config.prefix);
+            if !name_str.starts_with(&prefix) {
                 continue;
             }
 
             let path = entry.path();
             let metadata = tokio::fs::metadata(&path).await?;
+            let created = metadata.created().or_else(|_| metadata.modified()).ok();
 
-            // Parse timestamp from name
-            if let Some(timestamp_str) = name_str.strip_prefix(&format!("{}@", self.config.prefix))
-            {
-                snapshots.push(SnapshotInfo {
-                    name: name_str.to_string(),
-                    path: path.clone(),
-                    created: metadata.created().ok(),
-                    timestamp_str: timestamp_str.to_string(),
-                });
-            }
+            let counter = name_str
+                .strip_prefix(&prefix)
+                .and_then(|suffix| suffix.parse::<u64>().ok());
+
+            snapshots.push(SnapshotInfo {
+                name: name_str.to_string(),
+                path: path.clone(),
+                created,
+                counter,
+            });
         }
 
-        // Sort by timestamp (oldest first)
-        snapshots.sort_by(|a, b| a.timestamp_str.cmp(&b.timestamp_str));
+        // Sort by counter (oldest first), fall back to created time
+        snapshots.sort_by(|a, b| match (a.counter, b.counter) {
+            (Some(a_counter), Some(b_counter)) => a_counter.cmp(&b_counter),
+            _ => a.created.cmp(&b.created),
+        });
 
         Ok(snapshots)
     }
@@ -146,6 +150,21 @@ impl SnapshotManager {
         }
 
         Ok(())
+    }
+
+    async fn next_snapshot_counter(&self) -> Result<u64> {
+        let snapshots = self.list_snapshots().await?;
+        let mut max_counter = 0u64;
+
+        for snapshot in snapshots {
+            if let Some(counter) = snapshot.counter {
+                if counter > max_counter {
+                    max_counter = counter;
+                }
+            }
+        }
+
+        Ok(max_counter + 1)
     }
 
     /// Delete a specific snapshot
@@ -201,7 +220,7 @@ pub struct SnapshotInfo {
     pub path: PathBuf,
     #[allow(dead_code)]
     pub created: Option<std::time::SystemTime>,
-    pub timestamp_str: String,
+    pub counter: Option<u64>,
 }
 
 #[cfg(test)]
@@ -212,6 +231,6 @@ mod tests {
     fn test_snapshot_config_defaults() {
         let config = SnapshotConfig::default();
         assert_eq!(config.max_snapshots, 24);
-        assert_eq!(config.prefix, "cache");
+        assert_eq!(config.prefix, "SNP-cache");
     }
 }

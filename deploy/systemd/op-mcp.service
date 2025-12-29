@@ -1,0 +1,19 @@
+[Unit]
+Description=OP MCP Aggregator (HTTP + Chat Control Bridge)
+Documentation=file:/home/jeremy/op-dbus-v2/ANTIGRAVITY-MCP-README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jeremy/op-dbus-v2
+Environment=RUST_LOG=info
+Environment=MCP_CONFIG_FILE=/home/jeremy/op-dbus-v2/crates/op-mcp/mcp-config.json
+Environment=CHAT_CONTROL_MCP_BASE_URL=http://localhost:8081/api
+ExecStart=/usr/bin/env bash -c '/home/jeremy/op-dbus-v2/target/release/mcp-http-server --port 8082 --mcp-command /home/jeremy/op-dbus-v2/target/release/op-mcp-server >> /home/jeremy/op-dbus-v2/mcp-server.log 2>&1'
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

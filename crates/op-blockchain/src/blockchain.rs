@@ -6,9 +6,10 @@
 //! - state_subvol: Current system state for DR/reinstall
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
@@ -156,9 +157,11 @@ impl StreamingBlockchain {
 
     /// Create a snapshot of current state
     pub async fn create_snapshot(&self) -> Result<String> {
-        let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let snapshot_name = format!("state-{}", timestamp);
-        let snapshot_path = self.base_path.join("snapshots").join(&snapshot_name);
+        let snapshot_dir = self.base_path.join("snapshots");
+        let prefix = Self::state_snapshot_prefix();
+        let counter = self.next_snapshot_counter(&snapshot_dir, &prefix).await?;
+        let snapshot_name = format!("{}-{:06}", prefix, counter);
+        let snapshot_path = snapshot_dir.join(&snapshot_name);
 
         // Create BTRFS snapshot
         let output = Command::new("btrfs")
@@ -219,24 +222,26 @@ impl StreamingBlockchain {
         let snapshot_dir = self.base_path.join("snapshots");
         let mut entries = tokio::fs::read_dir(&snapshot_dir).await?;
         let mut snapshots = Vec::new();
+        let prefix = Self::state_snapshot_prefix();
 
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name().to_string_lossy().to_string();
 
-            if !name.starts_with("state-") {
+            let name_prefix = format!("{}-", prefix);
+            if !name.starts_with(&name_prefix) {
                 continue;
             }
 
-            if let Some(timestamp_str) = name.strip_prefix("state-") {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y%m%d-%H%M%S") {
-                    let dt_utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
-                    let human_readable = dt_utc.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-                    snapshots.push((name, human_readable));
-                }
-            }
+            let metadata = tokio::fs::metadata(entry.path()).await?;
+            let ts = metadata.created().or_else(|_| metadata.modified()).ok();
+            let human_readable = ts
+                .and_then(system_time_to_utc)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            snapshots.push((name, human_readable));
         }
 
-        // Sort by timestamp (newest first)
+        // Sort by name (newest counter first)
         snapshots.sort_by(|a, b| b.0.cmp(&a.0));
 
         Ok(snapshots)
@@ -292,19 +297,20 @@ impl StreamingBlockchain {
         let snapshot_dir = self.base_path.join("snapshots");
         let mut entries = tokio::fs::read_dir(&snapshot_dir).await?;
         let mut snapshots: Vec<(String, DateTime<Utc>)> = Vec::new();
+        let prefix = Self::state_snapshot_prefix();
 
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name().to_string_lossy().to_string();
 
-            if !name.starts_with("state-") {
+            let name_prefix = format!("{}-", prefix);
+            if !name.starts_with(&name_prefix) {
                 continue;
             }
 
-            if let Some(timestamp_str) = name.strip_prefix("state-") {
-                if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y%m%d-%H%M%S") {
-                    let dt_utc = DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
-                    snapshots.push((name, dt_utc));
-                }
+            let metadata = tokio::fs::metadata(entry.path()).await?;
+            let ts = metadata.created().or_else(|_| metadata.modified()).ok();
+            if let Some(dt_utc) = ts.and_then(system_time_to_utc) {
+                snapshots.push((name, dt_utc));
             }
         }
 
@@ -409,6 +415,36 @@ impl StreamingBlockchain {
         Ok(())
     }
 
+    fn state_snapshot_prefix() -> String {
+        std::env::var("OPDBUS_STATE_SNAPSHOT_PREFIX").unwrap_or_else(|_| "SNP-state".to_string())
+    }
+
+    async fn next_snapshot_counter(
+        &self,
+        snapshot_dir: &Path,
+        prefix: &str,
+    ) -> Result<u64> {
+        let mut entries = tokio::fs::read_dir(snapshot_dir).await?;
+        let name_prefix = format!("{}-", prefix);
+        let mut max_counter = 0u64;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&name_prefix) {
+                continue;
+            }
+            if let Some(counter_str) = name.strip_prefix(&name_prefix) {
+                if let Ok(counter) = counter_str.parse::<u64>() {
+                    if counter > max_counter {
+                        max_counter = counter;
+                    }
+                }
+            }
+        }
+
+        Ok(max_counter + 1)
+    }
+
     /// Get snapshot interval
     pub fn snapshot_interval(&self) -> SnapshotInterval {
         self.snapshot_interval
@@ -438,6 +474,10 @@ impl StreamingBlockchain {
     pub fn base_path(&self) -> &Path {
         &self.base_path
     }
+}
+
+fn system_time_to_utc(ts: SystemTime) -> Option<DateTime<Utc>> {
+    Some(DateTime::<Utc>::from(ts))
 }
 
 /// Recursively copy a directory

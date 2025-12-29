@@ -1,0 +1,43 @@
+[Unit]
+Description=OP-DBUS Agent Manager
+Documentation=https://github.com/ghostbridgetech/op-dbus
+After=dbus.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.opdbus.AgentManager
+User=root
+Group=root
+EnvironmentFile=-/etc/op-dbus/environment
+EnvironmentFile=-/etc/op-dbus/secrets.env
+WorkingDirectory=/opt/op-dbus
+ExecStart=/opt/op-dbus/bin/op-agent-manager
+Restart=on-failure
+RestartSec=5
+
+# D-Bus activation
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security (less restrictive since we need to spawn agents)
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=no
+PrivateDevices=no
+
+# Read-write paths
+ReadWritePaths=/var/lib/op-dbus /var/log/op-dbus /run/op-dbus /tmp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=op-dbus-agents
+
+[Install]
+WantedBy=multi-user.target
+Alias=dbus-org.opdbus.AgentManager.service

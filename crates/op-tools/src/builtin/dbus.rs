@@ -11,7 +11,6 @@ use tracing::info;
 use zbus::Connection;
 
 use crate::{Tool, ToolRegistry};
-use op_core::{ToolRequest, ToolResult};
 
 // ============================================================================
 // SYSTEMD RESTART UNIT TOOL
@@ -47,37 +46,24 @@ impl Tool for DbusSystemdRestartTool {
         })
     }
 
-    async fn execute(&self, request: ToolRequest) -> ToolResult {
-        let unit = match request.arguments.get("unit").and_then(|n| n.as_str()) {
-            Some(n) => n.to_string(),
-            None => return ToolResult {
-                success: false,
-                content: json!({"error": "Missing required parameter: unit"}),
-            },
-        };
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let unit = input
+            .get("unit")
+            .and_then(|n| n.as_str())
+            .map(|n| n.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: unit"))?;
 
-        let mode = request.arguments
-            .get("mode")
-            .and_then(|m| m.as_str())
-            .unwrap_or("replace");
+        let mode = input.get("mode").and_then(|m| m.as_str()).unwrap_or("replace");
 
         info!("Restarting unit '{}' via D-Bus", unit);
 
-        match restart_unit_dbus(&unit, mode).await {
-            Ok(job_path) => ToolResult {
-                success: true,
-                content: json!({
-                    "restarted": true,
-                    "unit": unit,
-                    "job_path": job_path,
-                    "protocol": "D-Bus"
-                }),
-            },
-            Err(e) => ToolResult {
-                success: false,
-                content: json!({"error": e.to_string()}),
-            },
-        }
+        let job_path = restart_unit_dbus(&unit, mode).await?;
+        Ok(json!({
+            "restarted": true,
+            "unit": unit,
+            "job_path": job_path,
+            "protocol": "D-Bus"
+        }))
     }
 
     fn category(&self) -> &str {
@@ -136,37 +122,24 @@ impl Tool for DbusSystemdStartTool {
         })
     }
 
-    async fn execute(&self, request: ToolRequest) -> ToolResult {
-        let unit = match request.arguments.get("unit").and_then(|n| n.as_str()) {
-            Some(n) => n.to_string(),
-            None => return ToolResult {
-                success: false,
-                content: json!({"error": "Missing required parameter: unit"}),
-            },
-        };
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let unit = input
+            .get("unit")
+            .and_then(|n| n.as_str())
+            .map(|n| n.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: unit"))?;
 
-        let mode = request.arguments
-            .get("mode")
-            .and_then(|m| m.as_str())
-            .unwrap_or("replace");
+        let mode = input.get("mode").and_then(|m| m.as_str()).unwrap_or("replace");
 
         info!("Starting unit '{}' via D-Bus", unit);
 
-        match start_unit_dbus(&unit, mode).await {
-            Ok(job_path) => ToolResult {
-                success: true,
-                content: json!({
-                    "started": true,
-                    "unit": unit,
-                    "job_path": job_path,
-                    "protocol": "D-Bus"
-                }),
-            },
-            Err(e) => ToolResult {
-                success: false,
-                content: json!({"error": e.to_string()}),
-            },
-        }
+        let job_path = start_unit_dbus(&unit, mode).await?;
+        Ok(json!({
+            "started": true,
+            "unit": unit,
+            "job_path": job_path,
+            "protocol": "D-Bus"
+        }))
     }
 
     fn category(&self) -> &str {
@@ -225,37 +198,24 @@ impl Tool for DbusSystemdStopTool {
         })
     }
 
-    async fn execute(&self, request: ToolRequest) -> ToolResult {
-        let unit = match request.arguments.get("unit").and_then(|n| n.as_str()) {
-            Some(n) => n.to_string(),
-            None => return ToolResult {
-                success: false,
-                content: json!({"error": "Missing required parameter: unit"}),
-            },
-        };
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let unit = input
+            .get("unit")
+            .and_then(|n| n.as_str())
+            .map(|n| n.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: unit"))?;
 
-        let mode = request.arguments
-            .get("mode")
-            .and_then(|m| m.as_str())
-            .unwrap_or("replace");
+        let mode = input.get("mode").and_then(|m| m.as_str()).unwrap_or("replace");
 
         info!("Stopping unit '{}' via D-Bus", unit);
 
-        match stop_unit_dbus(&unit, mode).await {
-            Ok(job_path) => ToolResult {
-                success: true,
-                content: json!({
-                    "stopped": true,
-                    "unit": unit,
-                    "job_path": job_path,
-                    "protocol": "D-Bus"
-                }),
-            },
-            Err(e) => ToolResult {
-                success: false,
-                content: json!({"error": e.to_string()}),
-            },
-        }
+        let job_path = stop_unit_dbus(&unit, mode).await?;
+        Ok(json!({
+            "stopped": true,
+            "unit": unit,
+            "job_path": job_path,
+            "protocol": "D-Bus"
+        }))
     }
 
     fn category(&self) -> &str {
@@ -309,27 +269,16 @@ impl Tool for DbusSystemdStatusTool {
         })
     }
 
-    async fn execute(&self, request: ToolRequest) -> ToolResult {
-        let unit = match request.arguments.get("unit").and_then(|n| n.as_str()) {
-            Some(n) => n.to_string(),
-            None => return ToolResult {
-                success: false,
-                content: json!({"error": "Missing required parameter: unit"}),
-            },
-        };
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let unit = input
+            .get("unit")
+            .and_then(|n| n.as_str())
+            .map(|n| n.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: unit"))?;
 
         info!("Getting status of unit '{}' via D-Bus", unit);
 
-        match get_unit_status_dbus(&unit).await {
-            Ok(status) => ToolResult {
-                success: true,
-                content: status,
-            },
-            Err(e) => ToolResult {
-                success: false,
-                content: json!({"error": e.to_string()}),
-            },
-        }
+        get_unit_status_dbus(&unit).await
     }
 
     fn category(&self) -> &str {
@@ -409,33 +358,25 @@ impl Tool for DbusSystemdListUnitsTool {
         })
     }
 
-    async fn execute(&self, request: ToolRequest) -> ToolResult {
-        let filter = request.arguments
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let filter = input
             .get("filter")
             .and_then(|f| f.as_str())
             .map(|s| s.to_string());
 
-        let active_only = request.arguments
+        let active_only = input
             .get("active_only")
             .and_then(|a| a.as_bool())
             .unwrap_or(false);
 
         info!("Listing systemd units via D-Bus");
 
-        match list_units_dbus(filter, active_only).await {
-            Ok(units) => ToolResult {
-                success: true,
-                content: json!({
-                    "units": units,
-                    "count": units.len(),
-                    "protocol": "D-Bus"
-                }),
-            },
-            Err(e) => ToolResult {
-                success: false,
-                content: json!({"error": e.to_string()}),
-            },
-        }
+        let units = list_units_dbus(filter, active_only).await?;
+        Ok(json!({
+            "units": units,
+            "count": units.len(),
+            "protocol": "D-Bus"
+        }))
     }
 
     fn category(&self) -> &str {
@@ -494,11 +435,11 @@ async fn list_units_dbus(filter: Option<String>, active_only: bool) -> Result<Ve
 }
 
 /// Register all D-Bus tools
-pub async fn register_dbus_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
-    registry.register(Arc::new(DbusSystemdRestartTool)).await?;
-    registry.register(Arc::new(DbusSystemdStartTool)).await?;
-    registry.register(Arc::new(DbusSystemdStopTool)).await?;
-    registry.register(Arc::new(DbusSystemdStatusTool)).await?;
-    registry.register(Arc::new(DbusSystemdListUnitsTool)).await?;
+pub async fn register_dbus_tools(registry: &ToolRegistry) -> Result<()> {
+    registry.register_tool(Arc::new(DbusSystemdRestartTool)).await?;
+    registry.register_tool(Arc::new(DbusSystemdStartTool)).await?;
+    registry.register_tool(Arc::new(DbusSystemdStopTool)).await?;
+    registry.register_tool(Arc::new(DbusSystemdStatusTool)).await?;
+    registry.register_tool(Arc::new(DbusSystemdListUnitsTool)).await?;
     Ok(())
 }

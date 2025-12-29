@@ -31,6 +31,7 @@ impl BackendArchitectAgent {
 
         let mut recommendations = Vec::new();
         let mut patterns = Vec::new();
+        let mut questions = Vec::new();
 
         // API Design Analysis
         if input.contains("api") || input.contains("rest") || input.contains("graphql") {
@@ -80,11 +81,32 @@ impl BackendArchitectAgent {
             patterns.push("Domain-Driven Design");
         }
 
+        // Targeted questions for chat UI integration
+        if input.contains("chat-ui")
+            || input.contains("huggingface")
+            || input.contains("interface")
+            || input.contains("ui")
+            || input.contains("mcp")
+            || input.contains("model")
+            || input.contains("stream")
+            || input.contains("auth")
+        {
+            questions.push("Which backend is canonical for chat requests today (op-web, op-web-ui, or another service)?");
+            questions.push("What are the existing chat endpoints and payload formats, and are they OpenAI-compatible?");
+            questions.push("How should model selection work (per user, per conversation, per request), and where is it configured?");
+            questions.push("Do you need streaming responses? If yes, what protocol (SSE/WS) and token format are expected?");
+            questions.push("What is the desired scope of the MCP tab (tool discovery only vs full config and execution)?");
+            questions.push("What authentication model is required (API keys, session cookies, HuggingFace token passthrough)?");
+            questions.push("Where should chat history persist (DB, filesystem, in-memory), and is multi-user isolation required?");
+            questions.push("Where should chat-ui live: separate app with reverse proxy, static build served by op-web, or embedded route?");
+        }
+
         let result = json!({
             "analysis": {
                 "input": args.unwrap_or(""),
                 "recommended_patterns": patterns,
                 "recommendations": recommendations,
+                "questions": questions,
                 "next_steps": [
                     "Define bounded contexts and service boundaries",
                     "Create API contract specifications",

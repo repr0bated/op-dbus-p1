@@ -6,10 +6,12 @@
 use op_chat::{ChatActorHandle, RpcRequest, RpcResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use tracing::{debug, error};
 use uuid::Uuid;
+
+use crate::resources::ResourceRegistry;
 
 /// MCP JSON-RPC 2.0 Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,14 +58,16 @@ impl McpError {
 pub struct McpServer {
     chat_handle: ChatActorHandle,
     allowed_namespaces: AllowedNamespaces,
+    resource_registry: ResourceRegistry,
 }
 
 impl McpServer {
     /// Create new MCP server with ChatActor handle
-    pub fn new(chat_handle: ChatActorHandle) -> Self {
+    pub fn new(chat_handle: ChatActorHandle, resource_registry: ResourceRegistry) -> Self {
         Self {
             chat_handle,
             allowed_namespaces: AllowedNamespaces::from_env(),
+            resource_registry,
         }
     }
 
@@ -124,6 +128,7 @@ impl McpServer {
         let response = self.chat_handle.list_tools().await;
         if response.success {
             let tools_value = response.result.unwrap_or_else(|| json!({}));
+            let mut category_counts: HashMap<String, usize> = HashMap::new();
             let tools_json = tools_value
                 .get("tools")
                 .and_then(|tools| tools.as_array())
@@ -132,12 +137,18 @@ impl McpServer {
                         .iter()
                         .filter(|tool| self.allowed_namespaces.is_allowed(tool_namespace(tool)))
                         .map(|tool| {
+                            let base_category = tool
+                                .get("category")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("general");
+                            let bucketed_category =
+                                bucket_category(base_category, &mut category_counts);
                             json!({
                                 "name": tool.get("name").cloned().unwrap_or(Value::Null),
                                 "description": tool.get("description").cloned().unwrap_or(Value::Null),
                                 "inputSchema": tool.get("input_schema").cloned().unwrap_or(Value::Null),
                                 "annotations": {
-                                    "category": tool.get("category").cloned().unwrap_or(Value::Null),
+                                    "category": bucketed_category,
                                     "tags": tool.get("tags").cloned().unwrap_or(Value::Null),
                                     "namespace": tool.get("namespace").cloned().unwrap_or(Value::Null)
                                 }
@@ -238,9 +249,22 @@ impl McpServer {
     async fn handle_resources_list(&self, request: McpRequest) -> McpResponse {
         debug!("MCP resources/list request");
 
-        // Return empty resources for now - can be extended with embedded docs
+        let resources = self
+            .resource_registry
+            .list_resources()
+            .iter()
+            .map(|resource| {
+                json!({
+                    "uri": resource.uri,
+                    "name": resource.name,
+                    "description": resource.description,
+                    "mimeType": resource.mime_type
+                })
+            })
+            .collect::<Vec<_>>();
+
         let result = json!({
-            "resources": []
+            "resources": resources
         });
 
         McpResponse {
@@ -255,11 +279,38 @@ impl McpServer {
     async fn handle_resources_read(&self, request: McpRequest) -> McpResponse {
         debug!("MCP resources/read request");
 
-        McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: None,
-            error: Some(McpError::new(-32601, "Resources not implemented")),
+        let params = request.params.unwrap_or_else(|| json!({}));
+        let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+        if uri.is_empty() {
+            return McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: Some(McpError::new(-32602, "Missing resource uri")),
+            };
+        }
+
+        match self.resource_registry.read_resource(uri).await {
+            Some(content) => McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: Some(json!({
+                    "contents": [
+                        {
+                            "uri": uri,
+                            "mimeType": "text/plain",
+                            "text": content
+                        }
+                    ]
+                })),
+                error: None,
+            },
+            None => McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: Some(McpError::new(-32602, "Unknown resource uri")),
+            },
         }
     }
 
@@ -370,4 +421,15 @@ fn tool_namespace(tool: &Value) -> &str {
     tool.get("namespace")
         .and_then(|value| value.as_str())
         .unwrap_or("system")
+}
+
+fn bucket_category(base: &str, counts: &mut HashMap<String, usize>) -> String {
+    let count = counts.entry(base.to_string()).or_insert(0);
+    let bucket = *count / 25;
+    *count += 1;
+    if bucket == 0 {
+        base.to_string()
+    } else {
+        format!("{}-{}", base, bucket + 1)
+    }
 }

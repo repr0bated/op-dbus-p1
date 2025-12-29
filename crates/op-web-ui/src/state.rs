@@ -18,6 +18,12 @@ pub struct AppState {
     pub current_model: String,
     /// Current provider
     pub current_provider: String,
+    /// Current chat session id
+    pub current_session_id: Option<String>,
+    /// Available LLM models
+    pub available_models: Vec<String>,
+    /// Available LLM providers
+    pub available_providers: Vec<String>,
     /// Connection status
     pub connected: bool,
     /// Loading state
@@ -34,6 +40,9 @@ impl AppState {
             system_status: None,
             current_model: "default".to_string(),
             current_provider: "unknown".to_string(),
+            current_session_id: None,
+            available_models: Vec::new(),
+            available_providers: Vec::new(),
             connected: false,
             loading: false,
             error: None,

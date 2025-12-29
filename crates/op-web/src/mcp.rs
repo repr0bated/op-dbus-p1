@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, debug};
 
@@ -129,13 +130,19 @@ async fn handle_initialized(id: Option<Value>) -> McpResponse {
 
 async fn handle_tools_list(state: &AppState, id: Option<Value>) -> McpResponse {
     let tools = state.tool_registry.list().await;
+    let mut category_counts: HashMap<String, usize> = HashMap::new();
 
     let tool_list: Vec<Value> = tools
         .iter()
         .map(|t| json!({
             "name": t.name,
             "description": t.description,
-            "inputSchema": t.input_schema.clone()
+            "inputSchema": t.input_schema.clone(),
+            "annotations": {
+                "category": bucket_category(&t.category, &mut category_counts),
+                "tags": t.tags.clone(),
+                "namespace": t.namespace.clone()
+            }
         }))
         .collect();
 
@@ -231,6 +238,17 @@ async fn handle_prompts_list(id: Option<Value>) -> McpResponse {
 
 async fn handle_ping(id: Option<Value>) -> McpResponse {
     McpResponse::success(id, json!({}))
+}
+
+fn bucket_category(base: &str, counts: &mut HashMap<String, usize>) -> String {
+    let count = counts.entry(base.to_string()).or_insert(0);
+    let bucket = *count / 25;
+    *count += 1;
+    if bucket == 0 {
+        base.to_string()
+    } else {
+        format!("{}-{}", base, bucket + 1)
+    }
 }
 
 /// GET /api/mcp/_discover - List MCP server capabilities

@@ -40,7 +40,11 @@ pub async fn chat_handler(
     Json(request): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
     info!("Chat request: {} chars", request.message.len());
-    let _requested_model = request.model.clone();
+    if let Some(model) = request.model.as_ref() {
+        if let Err(e) = state.chat_manager.switch_model(model.clone()).await {
+            error!("Model switch failed: {}", e);
+        }
+    }
 
     let session_id = request
         .session_id
@@ -51,25 +55,31 @@ pub async fn chat_handler(
         .process(&session_id, &request.message)
         .await
     {
-        Ok(result) => Json(ChatResponse {
-            success: result.success,
-            message: Some(result.message),
-            error: None,
-            tools_executed: result.tools_executed,
-            session_id,
-            model: state.default_model.clone(),
-            provider: state.provider_name.clone(),
-        }),
+        Ok(result) => {
+            let provider = state.chat_manager.current_provider().await;
+            let model = state.chat_manager.current_model().await;
+            Json(ChatResponse {
+                success: result.success,
+                message: Some(result.message),
+                error: None,
+                tools_executed: result.tools_executed,
+                session_id,
+            model,
+            provider: provider.to_string(),
+        })
+        }
         Err(e) => {
             error!("Chat processing failed: {}", e);
+            let provider = state.chat_manager.current_provider().await;
+            let model = state.chat_manager.current_model().await;
             Json(ChatResponse {
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
                 tools_executed: vec![],
                 session_id,
-                model: state.default_model.clone(),
-                provider: state.provider_name.clone(),
+                model,
+                provider: provider.to_string(),
             })
         }
     }

@@ -30,6 +30,16 @@ pub fn ChatPage() -> impl IntoView {
                 }
             }
         });
+
+        spawn_local(async move {
+            let client = ApiClient::default();
+            if let Ok(status) = client.llm_status().await {
+                app_state.update(|s| {
+                    s.current_provider = status.provider;
+                    s.current_model = status.model;
+                });
+            }
+        });
     });
 
     // Handle sending messages
@@ -50,17 +60,32 @@ pub fn ChatPage() -> impl IntoView {
 
         spawn_local(async move {
             let client = ApiClient::default();
-            match client.chat(&message, None).await {
+            let session_id = app_state.get().current_session_id.clone();
+            let model = app_state.get().current_model.clone();
+            match client
+                .chat(&message, session_id.as_deref(), Some(&model))
+                .await
+            {
                 Ok(response) => {
-                    let assistant_msg = ChatMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        role: MessageRole::Assistant,
-                        content: response.message,
-                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        tools_executed: vec![],
-                        tool_results: vec![],
-                    };
-                    app_state.update(|s| s.messages.push_back(assistant_msg));
+                    app_state.update(|s| {
+                        s.current_session_id = Some(response.session_id.clone());
+                        s.current_provider = response.provider.clone();
+                        s.current_model = response.model.clone();
+                    });
+
+                    if response.success {
+                        let assistant_msg = ChatMessage {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            role: MessageRole::Assistant,
+                            content: response.message.unwrap_or_default(),
+                            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            tools_executed: response.tools_executed.clone(),
+                            tool_results: vec![],
+                        };
+                        app_state.update(|s| s.messages.push_back(assistant_msg));
+                    } else {
+                        set_error.set(response.error.or_else(|| Some("Chat failed".to_string())));
+                    }
                 }
                 Err(e) => {
                     set_error.set(Some(e));
@@ -115,18 +140,19 @@ pub fn ToolsPage() -> impl IntoView {
         spawn_local(async move {
             let client = ApiClient::default();
             match client.list_tools().await {
-                Ok(tools) => {
+                Ok(tool_list) => {
                     // Convert ToolDefinition to ToolInfo
-                    let tool_infos: Vec<ToolInfo> = tools.into_iter().map(|tool| ToolInfo {
+                    let tool_infos: Vec<ToolInfo> = tool_list.tools.into_iter().map(|tool| ToolInfo {
                         name: tool.name,
                         description: tool.description,
                         category: tool.category,
-                        input_schema: serde_json::json!({}),
+                        input_schema: tool.input_schema.unwrap_or_else(|| serde_json::json!({})),
                     }).collect();
                     app_state.update(|s| s.tools = tool_infos);
                     set_loading.set(false);
                 }
-                Err(_) => {
+                Err(e) => {
+                    _set_error.set(Some(e));
                     set_loading.set(false);
                 }
             }
@@ -151,7 +177,9 @@ pub fn ToolsPage() -> impl IntoView {
                     Ok(result) => {
                         set_execution_result.set(Some(result));
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        _set_error.set(Some(e));
+                    }
                 }
             });
         }
@@ -338,9 +366,120 @@ pub fn StatusPage() -> impl IntoView {
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let app_state = expect_context::<RwSignal<AppState>>();
+    let (loading, set_loading) = create_signal(true);
+    let (error, set_error) = create_signal::<Option<String>>(None);
+    let (switching, set_switching) = create_signal(false);
     
     let provider = move || app_state.get().current_provider.clone();
     let model = move || app_state.get().current_model.clone();
+    let models = move || app_state.get().available_models.clone();
+    let providers = move || app_state.get().available_providers.clone();
+
+    create_effect(move |_| {
+        spawn_local(async move {
+            let client = ApiClient::default();
+
+            match client.llm_providers().await {
+                Ok(response) => {
+                    app_state.update(|s| {
+                        s.available_providers = response.providers;
+                        s.current_provider = response.current;
+                    });
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                }
+            }
+
+            match client.llm_models().await {
+                Ok(response) => {
+                    app_state.update(|s| {
+                        s.available_models = response
+                            .models
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|m| m.id)
+                            .collect();
+                        if let Some(current) = response.current {
+                            s.current_model = current;
+                        }
+                    });
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                }
+            }
+
+            if let Ok(status) = client.llm_status().await {
+                app_state.update(|s| {
+                    s.current_provider = status.provider;
+                    s.current_model = status.model;
+                });
+            }
+
+            set_loading.set(false);
+        });
+    });
+
+    let on_switch_model = move |new_model: String| {
+        set_switching.set(true);
+        set_error.set(None);
+        spawn_local(async move {
+            let client = ApiClient::default();
+            match client.switch_model(&new_model).await {
+                Ok(response) => {
+                    if response.success {
+                        app_state.update(|s| s.current_model = response.model);
+                    } else {
+                        set_error.set(response.note.or_else(|| Some("Model switch failed".to_string())));
+                    }
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                }
+            }
+            set_switching.set(false);
+        });
+    };
+
+    let on_switch_provider = move |new_provider: String| {
+        set_switching.set(true);
+        set_error.set(None);
+        spawn_local(async move {
+            let client = ApiClient::default();
+            match client.switch_provider(&new_provider).await {
+                Ok(response) => {
+                    if response.success {
+                        app_state.update(|s| s.current_provider = new_provider.clone());
+                        match client.llm_models().await {
+                            Ok(models_response) => {
+                                app_state.update(|s| {
+                                    s.available_models = models_response
+                                        .models
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(|m| m.id)
+                                        .collect();
+                                    if let Some(current) = models_response.current {
+                                        s.current_model = current;
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                set_error.set(Some(e));
+                            }
+                        }
+                    } else {
+                        set_error.set(response.note.or_else(|| Some("Provider switch failed".to_string())));
+                    }
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                }
+            }
+            set_switching.set(false);
+        });
+    };
 
     view! {
         <div class="settings-page">
@@ -348,13 +487,69 @@ pub fn SettingsPage() -> impl IntoView {
             
             <section class="settings-section">
                 <h3>"LLM Configuration"</h3>
+                {move || loading.get().then(|| view! { <LoadingSpinner/> })}
+                {move || error.get().map(|e| view! { <ErrorDisplay message=e/> })}
                 <div class="setting-item">
                     <label>"Provider"</label>
-                    <span class="setting-value">{provider}</span>
+                    <div class="setting-value">
+                        {move || {
+                            if providers().is_empty() {
+                                view! { <span>{provider}</span> }.into_view()
+                            } else {
+                                view! {
+                                    <select
+                                        on:change=move |ev| on_switch_provider(event_target_value(&ev))
+                                        prop:value=provider
+                                        disabled=move || switching.get()
+                                    >
+                                        {move || providers().into_iter().map(|p| view! {
+                                            <option value={p.clone()}>{p}</option>
+                                        }).collect_view()}
+                                    </select>
+                                }.into_view()
+                            }
+                        }}
+                    </div>
                 </div>
+                {move || {
+                    let count = providers().len();
+                    if count <= 1 {
+                        view! {
+                            <p class="settings-note">
+                                "Only one provider is available. To enable HuggingFace, set "
+                                <code>"HF_TOKEN"</code>
+                                " in "
+                                <code>"/etc/op-dbus/environment"</code>
+                                " and restart "
+                                <code>"op-web"</code>
+                                "."
+                            </p>
+                        }.into_view()
+                    } else {
+                        view! { <></> }.into_view()
+                    }
+                }}
                 <div class="setting-item">
                     <label>"Model"</label>
-                    <span class="setting-value">{model}</span>
+                    <div class="setting-value">
+                        {move || {
+                            if models().is_empty() {
+                                view! { <span>{model}</span> }.into_view()
+                            } else {
+                                view! {
+                                    <select
+                                        on:change=move |ev| on_switch_model(event_target_value(&ev))
+                                        prop:value=model
+                                        disabled=move || switching.get()
+                                    >
+                                        {move || models().into_iter().map(|m| view! {
+                                            <option value={m.clone()}>{m}</option>
+                                        }).collect_view()}
+                                    </select>
+                                }.into_view()
+                            }
+                        }}
+                    </div>
                 </div>
             </section>
             
@@ -364,6 +559,166 @@ pub fn SettingsPage() -> impl IntoView {
                 <p>"Built with Rust, Leptos (WebAssembly), and native Linux protocols."</p>
                 <p>"Uses D-Bus, OVSDB JSON-RPC, and rtnetlink - never CLI tools."</p>
             </section>
+        </div>
+    }
+}
+
+/// Models page - browse providers and models
+#[component]
+pub fn ModelsPage() -> impl IntoView {
+    let app_state = expect_context::<RwSignal<AppState>>();
+    let (loading, set_loading) = create_signal(true);
+    let (error, set_error) = create_signal::<Option<String>>(None);
+    let (providers, set_providers) = create_signal::<Vec<String>>(Vec::new());
+    let (selected_provider, set_selected_provider) = create_signal::<Option<String>>(None);
+    let (models, set_models) = create_signal::<Vec<LlmModelInfo>>(Vec::new());
+    let (current_model, set_current_model) = create_signal::<Option<String>>(None);
+    let (switching, set_switching) = create_signal(false);
+
+    let load_models = move |provider: String| {
+        set_loading.set(true);
+        set_error.set(None);
+        spawn_local(async move {
+            let client = ApiClient::default();
+            match client.llm_models_for_provider(&provider).await {
+                Ok(response) => {
+                    set_models.set(response.models.unwrap_or_default());
+                    set_current_model.set(response.current);
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                    set_models.set(Vec::new());
+                    set_current_model.set(None);
+                }
+            }
+            set_loading.set(false);
+        });
+    };
+
+    create_effect(move |_| {
+        spawn_local(async move {
+            let client = ApiClient::default();
+            match client.llm_providers().await {
+                Ok(response) => {
+                    let current = response.current.clone();
+                    set_providers.set(response.providers);
+                    set_selected_provider.set(Some(current.clone()));
+                    load_models(current);
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                    set_loading.set(false);
+                }
+            }
+        });
+    });
+
+    let on_select_provider = move |provider: String| {
+        set_selected_provider.set(Some(provider.clone()));
+        load_models(provider);
+    };
+
+    let on_use_model = move |provider: String, model: String| {
+        set_switching.set(true);
+        set_error.set(None);
+        spawn_local(async move {
+            let client = ApiClient::default();
+            let mut switched_provider = false;
+
+            if let Ok(response) = client.switch_provider(&provider).await {
+                if response.success {
+                    switched_provider = true;
+                    app_state.update(|s| s.current_provider = provider.clone());
+                } else {
+                    set_error.set(response.note.or_else(|| Some("Provider switch failed".to_string())));
+                }
+            }
+
+            if switched_provider {
+                match client.switch_model(&model).await {
+                    Ok(response) => {
+                        if response.success {
+                            app_state.update(|s| s.current_model = model.clone());
+                            set_current_model.set(Some(model));
+                        } else {
+                            set_error.set(response.note.or_else(|| Some("Model switch failed".to_string())));
+                        }
+                    }
+                    Err(e) => {
+                        set_error.set(Some(e));
+                    }
+                }
+            }
+
+            set_switching.set(false);
+        });
+    };
+
+    view! {
+        <div class="models-page">
+            <h2>"🧠 Models"</h2>
+            {move || error.get().map(|e| view! { <ErrorDisplay message=e/> })}
+
+            <div class="provider-tabs">
+                {move || providers.get().into_iter().map(|p| {
+                    let provider_name = p.clone();
+                    let provider_label = provider_name.clone();
+                    let provider_for_click = provider_name.clone();
+                    let active = selected_provider.get().as_deref() == Some(provider_name.as_str());
+                    view! {
+                        <button
+                            class="provider-tab"
+                            class:active=active
+                            on:click=move |_| on_select_provider(provider_for_click.clone())
+                            disabled=move || switching.get()
+                        >
+                            {provider_label}
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+
+            {move || loading.get().then(|| view! { <LoadingSpinner/> })}
+
+            <div class="model-list">
+                {move || models.get().into_iter().map(|m| {
+                    let provider = selected_provider.get().unwrap_or_default();
+                    let model_id = m.id.clone();
+                    let model_name = m.name.clone();
+                    let description = m.description.clone();
+                    let parameters = m.parameters.clone();
+                    let tags = m.tags.clone();
+                    let is_current = current_model.get().as_deref() == Some(model_id.as_str());
+                    view! {
+                        <div class="model-card" class:active=is_current>
+                            <div class="model-card-header">
+                                <div>
+                                    <h3>{model_name}</h3>
+                                    <p class="model-id">{model_id.clone()}</p>
+                                </div>
+                                <button
+                                    class="model-use"
+                                    on:click=move |_| on_use_model(provider.clone(), model_id.clone())
+                                    disabled=move || switching.get()
+                                >
+                                    {if is_current { "Active" } else { "Use" }}
+                                </button>
+                            </div>
+                            {description.as_ref().map(|d| view! {
+                                <p class="model-description">{d}</p>
+                            })}
+                            <div class="model-meta">
+                                {parameters.as_ref().map(|p| view! {
+                                    <span class="model-tag">{p}</span>
+                                })}
+                                {tags.into_iter().map(|t| view! {
+                                    <span class="model-tag">{t}</span>
+                                }).collect_view()}
+                            </div>
+                        </div>
+                    }
+                }).collect_view()}
+            </div>
         </div>
     }
 }

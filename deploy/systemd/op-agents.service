@@ -1,0 +1,28 @@
+# op-agents.service - Start common agents for op-dbus
+#
+# This service is a "meta" service that starts multiple agent instances
+# via the template unit. Useful for starting a default set of agents.
+#
+# Usage:
+#   systemctl start op-agents.service
+#   systemctl enable op-agents.service
+
+[Unit]
+Description=op-dbus Agent Collection
+Documentation=https://github.com/your-repo/op-dbus-v2
+After=dbus.service
+Requires=dbus.service
+
+# Start these agents when this service starts
+Wants=op-agent@python-pro.service
+Wants=op-agent@rust-pro.service
+Wants=op-agent@code-reviewer.service
+Wants=op-agent@security-auditor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+
+[Install]
+WantedBy=multi-user.target

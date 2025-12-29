@@ -522,6 +522,98 @@ body {
     margin-bottom: 1.5rem;
 }
 
+.models-page {
+    flex: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+    padding: 1rem;
+}
+
+.provider-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.provider-tab {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.provider-tab.active {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+.model-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.model-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.model-card.active {
+    border-color: var(--success);
+}
+
+.model-card-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    align-items: flex-start;
+}
+
+.model-id {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.model-use {
+    background: var(--accent);
+    color: var(--text-primary);
+    border: none;
+    border-radius: 6px;
+    padding: 0.4rem 0.8rem;
+    cursor: pointer;
+}
+
+.model-use:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.model-description {
+    margin: 0.5rem 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.model-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.model-tag {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-radius: 4px;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+}
+
 .settings-section h3 {
     margin-bottom: 1rem;
     color: var(--accent);

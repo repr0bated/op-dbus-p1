@@ -5,6 +5,11 @@
 // mod ovs;
 // mod systemd;
 // mod networkmanager;
+mod dbus;
+mod dbus_introspection;
+mod ovs_tools;
+mod packagekit;
+mod shell;
 mod agent_tool;
 mod file;
 mod procfs;
@@ -18,6 +23,8 @@ pub mod response_tools;
 pub use agent_tool::{create_agent_tool, create_agent_tool_with_executor, AgentTool};
 pub use file::FileTool;
 pub use procfs::{ProcFsReadTool, ProcFsWriteTool, SysFsReadTool, SysFsWriteTool};
+pub use shell::register_shell_tools;
+pub use ovs_tools::register_ovs_tools;
 // pub use system::SystemTool;
 // pub use plugin::PluginTool;
 
@@ -38,6 +45,11 @@ pub async fn register_response_tools(registry: &ToolRegistry) -> anyhow::Result<
     let _ = registry.register_tool(Arc::new(SysFsReadTool::new())).await;
     let _ = registry.register_tool(Arc::new(ProcFsWriteTool::new())).await;
     let _ = registry.register_tool(Arc::new(SysFsWriteTool::new())).await;
+
+    dbus::register_dbus_tools(registry).await?;
+    dbus_introspection::register_dbus_introspection_tools(registry).await?;
+    packagekit::register_packagekit_tools(registry).await?;
+    ovs_tools::register_ovs_tools(registry).await?;
 
     Ok(())
 }

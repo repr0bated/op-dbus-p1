@@ -159,7 +159,27 @@ impl OllamaCloudClient {
     /// Create from environment
     pub fn from_env() -> Self {
         let api_key = std::env::var("OLLAMA_API_KEY").ok();
-        Self::new(api_key)
+        let api_url = std::env::var("OLLAMA_API_URL").ok();
+        let library_url = std::env::var("OLLAMA_LIBRARY_URL").unwrap_or_else(|_| {
+            endpoints::LIBRARY_URL.to_string()
+        });
+
+        if let Some(api_url) = api_url {
+            let mut client = Self::new(api_key);
+            client.api_url = api_url;
+            client.library_url = library_url;
+            return client;
+        }
+
+        if api_key.is_some() {
+            let mut client = Self::new(api_key);
+            client.library_url = library_url;
+            return client;
+        }
+
+        let mut client = Self::local();
+        client.library_url = library_url;
+        client
     }
 
     /// Create for local Ollama instance
@@ -190,6 +210,7 @@ impl OllamaCloudClient {
     /// Fetch models dynamically
     async fn fetch_models_dynamic(&self) -> Result<Vec<ModelInfo>> {
         let endpoints = [
+            format!("{}/api/tags", self.api_url),
             format!("{}/api/tags", self.library_url),
             format!("{}/api/models", self.library_url),
         ];
