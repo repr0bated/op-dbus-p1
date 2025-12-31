@@ -217,6 +217,65 @@ git push origin master
 
 ---
 
+## Integration & Testing Prompt for Claude Code
+
+After copying files, use this prompt:
+
+```
+I just copied files from op-dbus-v2 into op-dbus-v2.1. Please:
+
+1. **Check for conflicts**: Compare the copied files with existing ones:
+   - Is there already a `config.rs` in op-mcp? (there is - op-mcp/src/config.rs from v2 vs what exists)
+   - Is `lazy_tools.rs` functionality already in `op-mcp-aggregator/src/compact.rs`?
+   - Does `server.rs` duplicate `op-web/src/mcp.rs`?
+
+2. **Wire up modules**: For each copied file, add to the appropriate `mod.rs` or `lib.rs`:
+   - Check `crates/op-mcp/src/lib.rs` - add mod declarations for new files
+   - Check `crates/op-mcp-old/src/lib.rs` - add mod declarations for introspection files
+
+3. **Resolve duplicates**: If functionality overlaps:
+   - Keep the more complete/recent version
+   - Delete the redundant file
+   - Update imports across codebase
+
+4. **Test compilation**:
+   ```bash
+   cargo check --workspace 2>&1 | head -100
+   ```
+   Fix any errors before proceeding.
+
+5. **Test runtime** (if compiles):
+   ```bash
+   cargo build --release -p op-web
+   ./target/release/op-web-server &
+   curl http://localhost:8080/api/health
+   curl http://localhost:8080/api/tools | jq '.tools | length'
+   # Kill server when done
+   pkill op-web-server
+   ```
+
+6. **Report findings**:
+   - Which files were redundant?
+   - Which files added new functionality?
+   - Any breaking changes?
+
+Focus on making it compile first, then verify functionality.
+```
+
+---
+
+## Known Potential Conflicts
+
+| Copied File | Might Conflict With | Resolution |
+|-------------|---------------------|------------|
+| `op-mcp/src/config.rs` | Existing config in op-mcp | Compare, keep better one |
+| `op-mcp/src/server.rs` | `op-web/src/mcp.rs` | May be different purpose |
+| `lazy_tools.rs` | `op-mcp-aggregator/compact.rs` | Lazy loading vs meta-tools - complementary? |
+| `router.rs` | `op-web/src/routes/` | Check if MCP-specific |
+| `tool_adapter.rs` | `op-mcp-aggregator/aggregator.rs` | May overlap |
+
+---
+
 ## Questions to Answer
 
 1. Should we consolidate repos into one? Which name to keep?
