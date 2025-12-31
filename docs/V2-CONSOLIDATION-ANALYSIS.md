@@ -385,24 +385,30 @@ use op_dynamic_loader::{ExecutionAwareLoader, SmartLoadingStrategy};
 │              OrchestratedToolAdapter                         │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              OrchestratedExecutor                     │   │
-│  │  ├── WorkstackRegistry                               │   │
-│  │  ├── SkillRegistry                                   │   │
-│  │  └── WorkflowRegistry                                │   │
+│  │  ├── WorkstackRegistry (multi-agent coordination)    │   │
+│  │  ├── SkillRegistry (execution enhancements)          │   │
+│  │  └── WorkflowRegistry (node-based pipelines)         │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                           │                                  │
 │  Execution Modes:                                           │
 │  ├── Direct      → Single tool execution                    │
-│  ├── Workstack   → Multi-phase coordinated execution        │
+│  ├── Workstack   → Multiple agents collaborating on task    │
 │  ├── Skill       → Skill-enhanced tool execution            │
-│  ├── MultiAgent  → Multi-agent coordination                 │
-│  └── Workflow    → Workflow-based execution                 │
+│  ├── MultiAgent  → Explicit multi-agent dispatch            │
+│  └── Workflow    → Node-based tool/service pipelines        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 #### Intended Functionality
-- **Orchestrated Execution**: Workstacks, skills, workflows
-- **Multi-Agent Coordination**: Distribute work across agents
-- **Skill Enhancement**: Apply skills to tool execution
+- **Workstacks**: Coordinate multiple agents working together on a single task
+  - Agents collaborate and share context
+  - Task decomposition across specialized agents
+  - Result aggregation from multiple agent outputs
+- **Workflows**: Node-based execution pipelines
+  - Tools and services treated as connectable nodes
+  - Visual/declarative flow definition
+  - Data flows between nodes (output → input)
+- **Skills**: Execution enhancements applied to tools
 - **Execution Tracking**: Full execution trace and metrics
 
 #### Missing Dependencies
