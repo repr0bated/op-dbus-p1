@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -14,9 +15,14 @@ pub struct OvsdbClient {
 impl OvsdbClient {
     /// Connect to OVSDB unix socket
     pub fn new() -> Self {
-        Self {
-            socket_path: "/var/run/openvswitch/db.sock".to_string(),
-        }
+        let paths = ["/var/run/openvswitch/db.sock", "/run/openvswitch/db.sock"];
+        let socket_path = paths
+            .iter()
+            .find(|p| Path::new(p).exists())
+            .unwrap_or(&"/var/run/openvswitch/db.sock")
+            .to_string();
+
+        Self { socket_path }
     }
 
     /// Ensure OVSDB database is initialized (similar to ovs-vsctl init)
@@ -251,13 +257,30 @@ impl OvsdbClient {
         }
     }
 
-    /// Add port to bridge
+    /// Add port to bridge (system port - attaches existing interface)
     pub async fn add_port(&self, bridge_name: &str, port_name: &str) -> Result<()> {
+        self.add_port_with_type(bridge_name, port_name, None).await
+    }
+
+    /// Add port to bridge with optional type (e.g., "internal" for virtual ports)
+    pub async fn add_port_with_type(&self, bridge_name: &str, port_name: &str, port_type: Option<&str>) -> Result<()> {
         // First, find the bridge UUID
         let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
 
         let port_uuid = format!("port-{}", port_name);
         let iface_uuid = format!("iface-{}", port_name);
+
+        // Build interface row - add type if specified
+        let interface_row = if let Some(iface_type) = port_type {
+            json!({
+                "name": port_name,
+                "type": iface_type
+            })
+        } else {
+            json!({
+                "name": port_name
+            })
+        };
 
         let operations = json!([
             {
@@ -272,9 +295,7 @@ impl OvsdbClient {
             {
                 "op": "insert",
                 "table": "Interface",
-                "row": {
-                    "name": port_name
-                },
+                "row": interface_row,
                 "uuid-name": iface_uuid
             },
             {
@@ -288,6 +309,7 @@ impl OvsdbClient {
         ]);
 
         self.transact(operations).await?;
+        log::info!("Port {} (type: {:?}) added to bridge {}", port_name, port_type, bridge_name);
         Ok(())
     }
 

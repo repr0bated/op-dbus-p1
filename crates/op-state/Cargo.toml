@@ -8,6 +8,7 @@ description = "State management system with plugin infrastructure, crypto, and s
 
 [dependencies]
 op-core = { path = "../op-core" }
+op-blockchain = { path = "../op-blockchain" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -10,6 +10,8 @@ pub mod types;
 pub mod error;
 pub mod connection;
 pub mod message;
+pub mod self_identity;
+pub mod config;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

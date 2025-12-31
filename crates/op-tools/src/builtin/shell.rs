@@ -277,27 +277,36 @@ impl Tool for ShellExecuteBatchTool {
 
         let mut results = Vec::new();
 
-        for entry in commands {
+        for (idx, entry) in commands.iter().enumerate() {
             // Rate limit each command in the batch
             if let Err(e) = validator.check_rate_limit(session_id).await {
                 return Err(anyhow::anyhow!("{}", e));
             }
 
-            let command = entry
-                .get("command")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Each command entry requires 'command'"))?;
+            // Support both object {"command": "..."} (or "cmd") and string "..."
+            let (command, working_dir, timeout_secs) = if let Some(cmd_str) = entry.as_str() {
+                (cmd_str, default_working_dir, default_timeout_secs)
+            } else {
+                let command = entry
+                    .get("command")
+                    .or_else(|| entry.get("cmd"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Command entry at index {} requires 'command' (or 'cmd') field or must be a string", idx))?;
 
-            let working_dir = entry
-                .get("working_dir")
-                .and_then(|v| v.as_str())
-                .unwrap_or(default_working_dir);
+                let working_dir = entry
+                    .get("working_dir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(default_working_dir);
 
-            let timeout_secs = entry
-                .get("timeout_secs")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(default_timeout_secs)
-                .min(max_timeout.as_secs());
+                let timeout = entry
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(default_timeout_secs);
+                    
+                (command, working_dir, timeout)
+            };
+            
+            let timeout_secs = timeout_secs.min(max_timeout.as_secs());
 
             // Check command access
             if let Err(e) = validator.check_command(command).await {

@@ -132,7 +132,12 @@ impl UnifiedOrchestrator {
         conversation_id: &str,
         input: &str,
     ) -> Result<OrchestratorResponse> {
-        info!("Processing: {} (session: {})", input, &conversation_id[..8]);
+        let session_short = if conversation_id.len() >= 8 {
+            &conversation_id[..8]
+        } else {
+            conversation_id
+        };
+        info!("Processing: {} (session: {})", input, session_short);
 
         // Ensure conversation exists
         self.ensure_conversation(conversation_id).await;

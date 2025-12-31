@@ -3,6 +3,7 @@
 //! These plugins implement the StatePlugin trait from op-state
 
 pub mod dnsresolver;
+pub mod full_system;
 pub mod keyring;
 pub mod login1;
 pub mod lxc;
@@ -19,6 +20,7 @@ pub mod systemd_networkd;
 
 // Re-export plugin types
 pub use dnsresolver::DnsResolverPlugin;
+pub use full_system::FullSystemPlugin;
 pub use login1::Login1Plugin;
 pub use lxc::LxcPlugin;
 pub use net::NetStatePlugin;

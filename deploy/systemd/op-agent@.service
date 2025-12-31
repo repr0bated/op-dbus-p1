@@ -30,8 +30,8 @@ RestartSec=5
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
+ProtectSystem=full
+ProtectHome=false
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
@@ -39,8 +39,13 @@ ProtectControlGroups=true
 # Allow read access to common directories for code analysis
 ReadOnlyPaths=/home /opt
 
+# Run as service user
+User=jeremy
+Group=jeremy
+
 # Environment
 Environment=RUST_LOG=info,op_agents=debug
+Environment="PATH=/home/jeremy/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 [Install]
 WantedBy=multi-user.target

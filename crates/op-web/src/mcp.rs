@@ -1,25 +1,23 @@
-//! MCP Protocol Handler with Category-Based Endpoints
-//!
-//! Implements MCP JSON-RPC 2.0 protocol with support for category filtering.
+//! MCP Protocol Handler with Profile-Based Tool Limiting
 //!
 //! ## Problem
 //!
-//! MCP clients have tool limits:
-//! - Antigravity: 100 tools
-//! - Cursor: ~40 tools
+//! MCP clients have TOTAL tool limits across ALL servers:
+//! - Cursor: ~40 tools total
+//! - Antigravity: 100 tools total
 //!
-//! op-dbus has 100+ tools, so we need to split them into categories.
+//! op-dbus has 150+ tools - categorization doesn't help because
+//! the limit is TOTAL, not per-server.
 //!
-//! ## Solution
+//! ## Solution: Profiles
 //!
-//! Serve tools at category-specific endpoints:
-//! - `/mcp` - All tools (may hit limits)
-//! - `/mcp/shell` - Shell/system tools only
-//! - `/mcp/dbus` - D-Bus tools only
-//! - `/mcp/network` - Network/OVS tools only
-//! - `/mcp/file` - Filesystem tools only
-//! - `/mcp/agent` - Agent tools only
-//! - `/mcp/chat` - Chat/response tools only
+//! Connect to ONE endpoint with a profile that limits to ~35 tools:
+//! - `/mcp/profile/rust-dev` → Rust + shell + file (35 tools)
+//! - `/mcp/profile/python-dev` → Python + shell + file (35 tools)  
+//! - `/mcp/profile/sysadmin` → Shell + systemd + network (35 tools)
+//! - `/mcp/profile/network` → OVS + bridge + netlink (35 tools)
+//!
+//! Each profile includes a curated set of the most useful tools.
 
 use axum::{
     extract::{Path, State},
@@ -31,39 +29,87 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
 use crate::state::AppState;
 
-/// Tool categories for MCP server splitting
-/// Includes both tools AND role-based agents
-pub const TOOL_CATEGORIES: &[(&str, &str)] = &[
-    // Core tools
-    ("shell", "Shell and system command tools"),
-    ("dbus", "D-Bus protocol tools (systemd, introspection)"),
-    ("network", "Network tools (OVS, rtnetlink, bridge)"),
-    ("file", "Filesystem tools (read, write, list)"),
-    ("agent", "Agent execution tools"),
-    ("chat", "Chat and response tools"),
-    ("package", "Package management tools"),
-    ("mcp", "External MCP integration tools"),
+/// Maximum tools per profile (must stay under Cursor's 40 limit)
+pub const MAX_TOOLS_PER_PROFILE: usize = 35;
+
+/// Tool profiles - each is a curated subset under 35 tools
+/// Format: (profile_name, description, included_tool_prefixes)
+pub const PROFILES: &[(&str, &str, &[&str])] = &[
+    // Development profiles
+    ("rust-dev", "Rust development (shell, file, cargo)", &[
+        "shell_", "file_", "process_", "respond_", "request_", "cannot_",
+        // Core response tools always included
+    ]),
+    ("python-dev", "Python development (shell, file, pip)", &[
+        "shell_", "file_", "process_", "respond_", "request_", "cannot_",
+    ]),
+    ("go-dev", "Go development (shell, file)", &[
+        "shell_", "file_", "process_", "respond_", "request_", "cannot_",
+    ]),
     
-    // Agent role categories
-    ("language", "Language-specific agents (Python, Rust, Go, etc.)"),
-    ("architecture", "Architecture agents (Backend, Frontend, GraphQL)"),
-    ("infrastructure", "Infrastructure agents (Cloud, K8s, Terraform, Network)"),
-    ("analysis", "Analysis agents (Code Review, Debug, Performance, Security)"),
-    ("business", "Business agents (Analyst, Support, HR, Legal, Sales)"),
-    ("content", "Content agents (Docs, API, Tutorial, Mermaid)"),
-    ("database", "Database agents (Architect, Optimizer, SQL)"),
-    ("operations", "Operations agents (DevOps, Incident, Testing)"),
-    ("orchestration", "Orchestration agents (Context, DX, TDD)"),
-    ("security", "Security coding agents (Backend, Frontend, Mobile)"),
-    ("seo", "SEO agents (Content, Keywords, Meta)"),
-    ("specialty", "Specialty agents (Blockchain, IoT, AR, Unity)"),
-    ("aiml", "AI/ML agents (Data Science, MLOps, Prompt Engineering)"),
-    ("webframeworks", "Web framework agents (Django, FastAPI, Temporal)"),
-    ("mobile", "Mobile agents (Flutter, iOS, Android)"),
+    // Sysadmin profiles  
+    ("sysadmin", "System administration (shell, systemd, process)", &[
+        "shell_", "systemd_", "process_", "file_read", "file_write", "file_list",
+        "respond_", "request_", "cannot_",
+    ]),
+    ("network", "Network administration (OVS, netlink, bridge)", &[
+        "ovs_", "bridge_", "netlink_", "network_", "shell_exec",
+        "respond_", "request_", "cannot_",
+    ]),
+    ("dbus", "D-Bus operations (introspection, method calls)", &[
+        "dbus_", "systemd_", "introspect_", 
+        "respond_", "request_", "cannot_",
+    ]),
+    
+    // Specialized profiles
+    ("containers", "Container management (LXC, Docker)", &[
+        "lxc_", "docker_", "container_", "shell_exec",
+        "respond_", "request_", "cannot_",
+    ]),
+    ("packages", "Package management (apt, dnf, pacman)", &[
+        "package_", "apt_", "dnf_", "shell_exec",
+        "respond_", "request_", "cannot_",
+    ]),
+    
+    // Agent profiles (select specific agent types)
+    ("agent-coding", "Coding agents (language-specific)", &[
+        "agent_rust", "agent_python", "agent_go", "agent_typescript",
+        "shell_exec", "file_",
+        "respond_", "request_", "cannot_",
+    ]),
+    ("agent-infra", "Infrastructure agents (cloud, k8s)", &[
+        "agent_docker", "agent_kubernetes", "agent_terraform", "agent_aws",
+        "shell_exec", "file_read",
+        "respond_", "request_", "cannot_",
+    ]),
+    ("agent-analysis", "Analysis agents (debug, review, security)", &[
+        "agent_code_review", "agent_debug", "agent_security", "agent_performance",
+        "shell_exec", "file_read",
+        "respond_", "request_", "cannot_",
+    ]),
+    
+    // Minimal profile (just essentials)
+    ("minimal", "Minimal tools (shell, file, response)", &[
+        "shell_exec", "file_read", "file_write", "file_list",
+        "respond_", "request_", "cannot_",
+    ]),
+
+    // Self-modification profile (chatbot's own source code)
+    ("self", "Self-modification tools (read, edit, commit, deploy own code)", &[
+        "self_", "file_", "shell_exec",
+        "respond_", "request_", "cannot_",
+    ]),
+];
+
+/// Core tools that are ALWAYS included in every profile
+const CORE_TOOLS: &[&str] = &[
+    "respond_to_user",
+    "request_clarification", 
+    "cannot_perform",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -118,125 +164,100 @@ impl McpResponse {
     }
 }
 
-/// Create MCP router with category-based endpoints
+/// Create MCP router with profile-based endpoints
 pub fn create_mcp_router(state: Arc<AppState>) -> Router {
     Router::new()
-        // Main endpoint (all tools)
-        .route("/", post(mcp_handler_all))
-        // Category-specific endpoints
-        .route("/shell", post(mcp_handler_shell))
-        .route("/dbus", post(mcp_handler_dbus))
-        .route("/network", post(mcp_handler_network))
-        .route("/file", post(mcp_handler_file))
-        .route("/agent", post(mcp_handler_agent))
-        .route("/chat", post(mcp_handler_chat))
-        .route("/package", post(mcp_handler_package))
-        // Dynamic category endpoint
-        .route("/category/:category", post(mcp_handler_category))
-        // Discovery endpoints
+        // Profile-based endpoints (USE THESE!)
+        .route("/profile/:profile", post(mcp_handler_profile))
+        // Custom user-defined profiles (from web UI)
+        .route("/custom/:profile", post(mcp_handler_custom_profile))
+        // Discovery
+        .route("/profiles", get(profiles_handler))
         .route("/_discover", get(discover_handler))
-        .route("/_categories", get(categories_handler))
         .route("/_config", get(config_handler))
+        // Legacy endpoints (may hit limits - warns in logs)
+        .route("/", post(mcp_handler_all))
         .with_state(state)
 }
 
-// Category filter functions
-fn filter_all(_category: &str) -> bool { true }
-fn filter_shell(category: &str) -> bool { 
-    matches!(category, "shell" | "system")
-}
-fn filter_dbus(category: &str) -> bool { 
-    matches!(category, "dbus" | "systemd" | "introspection")
-}
-fn filter_network(category: &str) -> bool { 
-    matches!(category, "network" | "ovs" | "bridge" | "netlink")
-}
-fn filter_file(category: &str) -> bool { 
-    matches!(category, "file" | "filesystem" | "procfs" | "sysfs")
-}
-fn filter_agent(category: &str) -> bool { 
-    matches!(category, "agent" | "execution")
-}
-fn filter_chat(category: &str) -> bool { 
-    matches!(category, "chat" | "response" | "communication")
-}
-fn filter_package(category: &str) -> bool { 
-    matches!(category, "package" | "packagekit")
+/// Profile-based handler - serves only tools matching the profile (max 35)
+async fn mcp_handler_profile(
+    State(state): State<Arc<AppState>>,
+    Path(profile_name): Path<String>,
+    Json(request): Json<McpRequest>,
+) -> Json<McpResponse> {
+    // Find the profile
+    let profile = PROFILES.iter().find(|(name, _, _)| *name == profile_name);
+    
+    let prefixes = match profile {
+        Some((_, _, prefixes)) => prefixes.to_vec(),
+        None => {
+            warn!("Unknown MCP profile: {}", profile_name);
+            return Json(McpResponse::error(
+                request.id,
+                -32602,
+                format!("Unknown profile: {}. Use GET /mcp/profiles for list.", profile_name),
+            ));
+        }
+    };
+    
+    let filter = move |tool_name: &str| {
+        // Core tools always pass
+        if CORE_TOOLS.contains(&tool_name) {
+            return true;
+        }
+        // Check prefixes
+        prefixes.iter().any(|p| tool_name.starts_with(p))
+    };
+    
+    mcp_handler_filtered(state, request, filter, &profile_name, Some(MAX_TOOLS_PER_PROFILE)).await
 }
 
-// Handler wrappers for each category
+/// Custom profile handler - serves tools selected via the web UI
+async fn mcp_handler_custom_profile(
+    State(state): State<Arc<AppState>>,
+    Path(profile_name): Path<String>,
+    Json(request): Json<McpRequest>,
+) -> Json<McpResponse> {
+    use crate::mcp_picker::CUSTOM_PROFILES;
+    
+    // Load the custom profile
+    let selected_tools: std::collections::HashSet<String> = match CUSTOM_PROFILES.get_profile(&profile_name).await {
+        Some(tools) => tools,
+        None => {
+            warn!("Unknown custom MCP profile: {}", profile_name);
+            return Json(McpResponse::error(
+                request.id,
+                -32602,
+                format!("Custom profile '{}' not found. Create one at /mcp-picker", profile_name),
+            ));
+        }
+    };
+    
+    info!("Using custom MCP profile '{}' with {} tools", profile_name, selected_tools.len());
+    
+    let filter = move |tool_name: &str| selected_tools.contains(tool_name);
+    
+    mcp_handler_filtered(state, request, filter, &format!("custom-{}", profile_name), Some(MAX_TOOLS_PER_PROFILE)).await
+}
+
+/// Legacy handler (all tools - may exceed client limits)
 async fn mcp_handler_all(
     State(state): State<Arc<AppState>>,
     Json(request): Json<McpRequest>,
 ) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_all, "all").await
+    warn!("Using /mcp endpoint without profile - may exceed tool limits. Use /mcp/profile/:name instead.");
+    let filter = |_: &str| true;
+    mcp_handler_filtered(state, request, filter, "all", None).await
 }
 
-async fn mcp_handler_shell(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_shell, "shell").await
-}
-
-async fn mcp_handler_dbus(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_dbus, "dbus").await
-}
-
-async fn mcp_handler_network(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_network, "network").await
-}
-
-async fn mcp_handler_file(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_file, "file").await
-}
-
-async fn mcp_handler_agent(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_agent, "agent").await
-}
-
-async fn mcp_handler_chat(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_chat, "chat").await
-}
-
-async fn mcp_handler_package(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    mcp_handler_filtered(state, request, filter_package, "package").await
-}
-
-async fn mcp_handler_category(
-    State(state): State<Arc<AppState>>,
-    Path(category): Path<String>,
-    Json(request): Json<McpRequest>,
-) -> Json<McpResponse> {
-    let category_clone = category.clone();
-    let filter = move |cat: &str| cat == category_clone.as_str();
-    mcp_handler_filtered(state, request, filter, &category).await
-}
-
-/// Core MCP handler with category filtering
+/// Core MCP handler with tool name filtering and optional limit
 async fn mcp_handler_filtered<F>(
     state: Arc<AppState>,
     request: McpRequest,
-    category_filter: F,
+    tool_filter: F,
     server_name: &str,
+    max_tools: Option<usize>,
 ) -> Json<McpResponse>
 where
     F: Fn(&str) -> bool,
@@ -255,7 +276,7 @@ where
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(request.id, server_name).await,
         "initialized" => handle_initialized(request.id).await,
-        "tools/list" => handle_tools_list(&state, request.id, &category_filter, request.params.clone()).await,
+        "tools/list" => handle_tools_list(&state, request.id, &tool_filter, request.params.clone(), max_tools).await,
         "tools/describe" => handle_tools_describe(&state, request.id, request.params).await,
         "tools/call" => handle_tools_call(&state, request.id, request.params).await,
         "resources/list" => handle_resources_list(request.id).await,
@@ -302,8 +323,9 @@ async fn handle_initialized(id: Option<Value>) -> McpResponse {
 async fn handle_tools_list<F>(
     state: &AppState, 
     id: Option<Value>, 
-    category_filter: F,
+    tool_filter: F,
     params: Option<Value>,
+    max_tools: Option<usize>,
 ) -> McpResponse
 where
     F: Fn(&str) -> bool,
@@ -318,11 +340,11 @@ where
         .unwrap_or(false);
 
     // Check for pagination
-    let limit = params
+    let param_limit = params
         .as_ref()
         .and_then(|p| p.get("limit"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(1000) as usize;
+        .map(|v| v as usize);
     
     let offset = params
         .as_ref()
@@ -330,17 +352,26 @@ where
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
 
+    // Filter by tool NAME (not category) for profile matching
     let filtered: Vec<_> = tools
         .iter()
-        .filter(|t| category_filter(&t.category))
+        .filter(|t| tool_filter(&t.name))
         .collect();
     
-    let total = filtered.len();
+    let total_matching = filtered.len();
+    
+    // Apply max_tools limit if set (for profile-based limiting)
+    let effective_limit = match (max_tools, param_limit) {
+        (Some(max), Some(param)) => max.min(param),
+        (Some(max), None) => max,
+        (None, Some(param)) => param,
+        (None, None) => 1000,
+    };
     
     let tool_list: Vec<Value> = filtered
         .into_iter()
         .skip(offset)
-        .take(limit)
+        .take(effective_limit)
         .map(|t| {
             if lite_mode {
                 // Lite mode: name + description only (for discovery)
@@ -367,19 +398,25 @@ where
         })
         .collect();
 
+    let served = tool_list.len();
+    
     info!(
-        "MCP tools/list: {} tools returned (lite={}, total={})",
-        tool_list.len(),
-        lite_mode,
-        total
+        "MCP tools/list: {} tools returned (limit={}, max={:?}, total_matching={}, lite={})",
+        served,
+        effective_limit,
+        max_tools,
+        total_matching,
+        lite_mode
     );
 
     McpResponse::success(id, json!({ 
         "tools": tool_list,
         "_meta": {
-            "total": total,
+            "served": served,
+            "total_matching": total_matching,
             "offset": offset,
-            "limit": limit,
+            "limit": effective_limit,
+            "max_tools": max_tools,
             "lite_mode": lite_mode
         }
     }))
@@ -538,10 +575,63 @@ async fn handle_ping(id: Option<Value>) -> McpResponse {
     McpResponse::success(id, json!({}))
 }
 
+/// GET /mcp/profiles - List all available profiles (both built-in and custom)
+pub async fn profiles_handler(
+    State(_state): State<Arc<AppState>>,
+) -> Json<Value> {
+    use crate::mcp_picker::CUSTOM_PROFILES;
+    
+    // Built-in profiles
+    let builtin: Vec<Value> = PROFILES.iter().map(|(name, desc, prefixes)| {
+        json!({
+            "name": name,
+            "description": desc,
+            "type": "builtin",
+            "prefixes": prefixes,
+            "endpoint": format!("/mcp/profile/{}", name)
+        })
+    }).collect();
+    
+    // Custom profiles
+    let custom_names: Vec<String> = CUSTOM_PROFILES.list_profiles().await;
+    let mut custom: Vec<Value> = Vec::new();
+    for name in custom_names {
+        let name: String = name;
+        if let Some(tools) = CUSTOM_PROFILES.get_profile(&name).await {
+            let tools: std::collections::HashSet<String> = tools;
+            let name_clone = name.clone();
+            let description = format!("Custom profile with {} tools", tools.len());
+            let tool_count = tools.len();
+            let endpoint = format!("/mcp/custom/{}", name);
+            
+            custom.push(json!({
+                "name": name_clone,
+                "description": description,
+                "type": "custom",
+                "tool_count": tool_count,
+                "endpoint": endpoint
+            }));
+        }
+    }
+    
+    Json(json!({
+        "max_tools_per_profile": MAX_TOOLS_PER_PROFILE,
+        "builtin_profiles": builtin,
+        "custom_profiles": custom,
+        "picker_ui": "/mcp-picker",
+        "usage": {
+            "builtin": "POST /mcp/profile/{profile_name}",
+            "custom": "POST /mcp/custom/{profile_name}"
+        }
+    }))
+}
+
 /// GET /mcp/_discover - Discover all MCP endpoints
 pub async fn discover_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
+    use crate::mcp_picker::CUSTOM_PROFILES;
+    
     let tools = state.tool_registry.list().await;
     
     // Count tools per category
@@ -549,27 +639,33 @@ pub async fn discover_handler(
     for tool in &tools {
         *category_counts.entry(tool.category.clone()).or_insert(0) += 1;
     }
+    
+    // Custom profiles
+    let custom_profiles = CUSTOM_PROFILES.list_profiles().await;
 
     Json(json!({
         "server": "op-dbus-mcp",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": "MCP 2024-11-05",
         "total_tools": tools.len(),
+        "max_tools_per_profile": MAX_TOOLS_PER_PROFILE,
         "category_counts": category_counts,
+        "builtin_profiles": PROFILES.iter().map(|(name, desc, _)| json!({
+            "name": name,
+            "description": desc,
+            "endpoint": format!("/mcp/profile/{}", name)
+        })).collect::<Vec<_>>(),
+        "custom_profiles": custom_profiles,
         "endpoints": {
-            "all": "/mcp",
-            "shell": "/mcp/shell",
-            "dbus": "/mcp/dbus",
-            "network": "/mcp/network",
-            "file": "/mcp/file",
-            "agent": "/mcp/agent",
-            "chat": "/mcp/chat",
-            "package": "/mcp/package"
+            "picker_ui": "/mcp-picker",
+            "profiles": "/mcp/profiles",
+            "discover": "/mcp/_discover",
+            "config": "/mcp/_config"
         },
-        "client_configs": {
-            "antigravity": "/mcp/_config/antigravity",
-            "cursor": "/mcp/_config/cursor",
-            "vscode": "/mcp/_config/vscode"
+        "usage": {
+            "step1": "Visit /mcp-picker to select tools (max 35)",
+            "step2": "Save your custom profile",
+            "step3": "Use /mcp/custom/{name} as your MCP endpoint"
         }
     }))
 }

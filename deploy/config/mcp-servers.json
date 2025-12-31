@@ -1,5 +1,11 @@
 [
   {
+    "name": "op-dbus",
+    "description": "System automation tools via op-dbus (Default Profile)",
+    "serverUrl": "http://127.0.0.1:8080/mcp/custom/default",
+    "enabled": true
+  },
+  {
     "name": "filesystem",
     "description": "File system access for reading and writing files",
     "command": "npx",

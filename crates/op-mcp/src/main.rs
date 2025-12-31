@@ -3,13 +3,23 @@
 //! Main entry point for the MCP server that exposes op-dbus-v2 functionality
 //! via the Model Context Protocol. This is a thin adapter that delegates
 //! all functionality to op-chat, op-tools, and op-introspection.
+//!
+//! Supports two transport modes:
+//! - stdio (default): For MCP clients that launch the server as a subprocess
+//! - SSE (--sse): HTTP server for long-running daemon mode
+//!
+//! Usage:
+//!   op-mcp-server              # stdio mode (for MCP clients)
+//!   op-mcp-server --sse        # SSE mode on 127.0.0.1:3001
+//!   op-mcp-server --sse --bind 0.0.0.0:8090  # Custom bind address
 
 use anyhow::Result;
 use op_chat::{ChatActor, ChatActorConfig};
-use op_mcp::{McpRequest, McpServer, ResourceRegistry};
+use op_mcp::{McpRequest, McpServer, ResourceRegistry, run_sse_server};
 use op_tools::ToolRegistry;
 use tokio::io::BufReader;
 use std::sync::Arc;
+use std::env;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -17,16 +27,28 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Load environment from /etc/op-dbus/environment (if exists)
+    op_core::config::load_environment();
+
+    // Parse command line args
+    let args: Vec<String> = env::args().collect();
+    let use_sse = args.iter().any(|a| a == "--sse");
+    let bind_addr = args.iter()
+        .position(|a| a == "--bind")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or("127.0.0.1:3001");
+
+    // Initialize logging (stderr for stdio mode, stdout for SSE)
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "op_mcp=debug,tokio=warn,warn".into()),
+                .unwrap_or_else(|_| "op_mcp=info,tokio=warn,warn".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    info!("Starting op-mcp-server");
+    info!("Starting op-mcp-server (mode: {})", if use_sse { "SSE" } else { "stdio" });
 
     // Create tool registry and register tools
     let tool_registry = Arc::new(ToolRegistry::new());
@@ -40,12 +62,16 @@ async fn main() -> Result<()> {
     info!("ChatActor started, ready to handle MCP requests");
 
     // Create MCP server
-    // Create resource registry (dynamic prompts)
     let resource_registry = ResourceRegistry::new();
     let mcp_server = Arc::new(McpServer::new(chat_handle, resource_registry));
 
-    // Run the MCP protocol loop
-    run_mcp_protocol(mcp_server).await?;
+    // Run in selected mode
+    if use_sse {
+        info!("Starting SSE transport on {}", bind_addr);
+        run_sse_server(mcp_server, bind_addr).await?;
+    } else {
+        run_mcp_protocol(mcp_server).await?;
+    }
 
     info!("op-mcp-server shutting down");
     Ok(())

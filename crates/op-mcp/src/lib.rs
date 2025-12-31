@@ -7,7 +7,8 @@
 //! - op-introspection (D-Bus discovery)
 //!
 //! Architecture:
-//! stdin → MCP JSON-RPC → ChatActorHandle → stdout
+//! - stdio: stdin → MCP JSON-RPC → ChatActorHandle → stdout
+//! - SSE:   HTTP POST /message → MCP JSON-RPC → GET /sse (streaming)
 //! 
 //! Methods:
 //! - initialize → handshake
@@ -18,12 +19,14 @@
 
 pub mod protocol;
 pub mod resources;
+pub mod sse;
 
 // Re-export main types
 pub use protocol::{McpError, McpRequest, McpResponse, McpServer};
 pub use resources::ResourceRegistry;
+pub use sse::run_sse_server;
 
 /// Prelude for convenient imports
 pub mod prelude {
-    pub use super::{McpError, McpRequest, McpResponse, McpServer, ResourceRegistry};
+    pub use super::{McpError, McpRequest, McpResponse, McpServer, ResourceRegistry, run_sse_server};
 }

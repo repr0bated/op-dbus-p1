@@ -1,7 +1,10 @@
 //! Chat Manager - Manages provider switching and chat sessions
 //!
-//! Supports multiple LLM providers with HuggingFace Inference API as the
-//! cost-effective default (~$10 for 20,000 messages).
+//! Streamlined for production use with essential providers only:
+//! - Gemini 3 (Vertex AI) - Code Assist Enterprise
+//! - Ollama - Local/cloud models
+//! - Claude - Anthropic premium models
+//! - OpenAI - GPT-4 and code models
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -12,21 +15,18 @@ use tracing::{debug, info};
 use async_trait::async_trait;
 use crate::anthropic::AnthropicClient;
 use crate::gemini::GeminiClient;
-use crate::huggingface::HuggingFaceClient;
 use crate::ollama::OllamaCloudClient;
-use crate::perplexity::PerplexityClient;
 use crate::provider::{
     BoxedProvider, ChatMessage, ChatRequest, ChatResponse, LlmProvider, ModelInfo, ProviderType,
 };
 
 /// Chat manager - handles multiple providers and model selection
-/// 
-/// Provider priority (by cost-effectiveness):
-/// 1. HuggingFace Inference API - $10/20k messages, supports 236B models
-/// 2. Ollama - Free (local) or cloud pricing
-/// 3. Gemini - Free tier available
-/// 4. Perplexity - ~$5/1000 requests (with search)
-/// 5. Anthropic - Premium pricing but highest quality
+///
+/// Essential providers for production use:
+/// 1. Gemini 3 (Vertex AI) - Default, included in Code Assist Enterprise
+/// 2. Ollama - Local/cloud models
+/// 3. Claude - Anthropic premium models
+/// 4. OpenAI - GPT-4 and code models
 pub struct ChatManager {
     providers: HashMap<ProviderType, BoxedProvider>,
     current_provider: Arc<RwLock<ProviderType>>,
@@ -35,84 +35,54 @@ pub struct ChatManager {
 }
 
 impl ChatManager {
-    /// Create a new chat manager with available providers
-    /// 
-    /// Initializes providers in order of cost-effectiveness:
-    /// - HuggingFace first (best value at $10/20k messages)
-    /// - Then other providers based on API key availability
+    /// Create a new chat manager with essential providers only
+    ///
+    /// Initializes: Gemini (Vertex), Ollama, Claude, OpenAI
     pub fn new() -> Self {
         let mut providers: HashMap<ProviderType, BoxedProvider> = HashMap::new();
         let mut default_provider = None;
-        let mut default_model = "llama3.2".to_string();
+        let mut default_model = "gemini-2.5-flash".to_string(); // Auto-updates to latest 2.5 Flash
 
         // =====================================================
-        // HuggingFace FIRST - Best value: $10 for 20,000 messages
-        // Supports models up to 405B parameters!
-        // =====================================================
-        if let Ok(hf) = HuggingFaceClient::from_env() {
-            info!("✅ HuggingFace provider initialized");
-            info!("   💰 Cost: ~$10 for 20,000 messages (Inference API)");
-            info!("   🚀 Supports: 1B to 405B parameter models");
-            info!("   ⭐ Recommended: DeepSeek V2.5 (236B) for best quality");
-            providers.insert(ProviderType::HuggingFace, Box::new(hf));
-            if default_provider.is_none() {
-                default_provider = Some(ProviderType::HuggingFace);
-                // Default to DeepSeek V2.5 (236B) - the flagship model
-                default_model = "deepseek-ai/DeepSeek-V2.5".to_string();
-            }
-        } else {
-            debug!("HuggingFace provider not available (HF_TOKEN not set)");
-        }
-
-        // =====================================================
-        // Ollama - Free (local) or cloud pricing
-        // =====================================================
-        let ollama = OllamaCloudClient::from_env();
-        info!("✅ Ollama provider initialized (local or cloud)");
-        providers.insert(ProviderType::Ollama, Box::new(ollama));
-        if default_provider.is_none() {
-            default_provider = Some(ProviderType::Ollama);
-            default_model = "llama3.2".to_string();
-        }
-
-        // =====================================================
-        // Gemini - Free tier available
+        // Gemini 3 (Vertex AI) - DEFAULT
+        // Code Assist Enterprise - included in subscription
         // =====================================================
         if let Ok(gemini) = GeminiClient::from_env() {
-            info!("✅ Gemini provider initialized (free tier available)");
+            info!("✅ Gemini 3 provider initialized (Vertex AI)");
+            info!("   🏢 Code Assist Enterprise");
+            info!("   🔥 Model: gemini-2.5-flash (auto-updating)");
             providers.insert(ProviderType::Gemini, Box::new(gemini));
-            if default_provider.is_none() {
-                default_provider = Some(ProviderType::Gemini);
-                default_model = "gemini-2.5-flash".to_string();
-            }
+            default_provider = Some(ProviderType::Gemini);
+            default_model = "gemini-2.5-flash".to_string();
         } else {
             debug!("Gemini provider not available (GEMINI_API_KEY not set)");
         }
 
         // =====================================================
-        // Perplexity - ~$5/1000 requests (includes search)
+        // Ollama - Local or cloud models (fallback only)
         // =====================================================
-        if let Ok(perplexity) = PerplexityClient::from_env() {
-            info!("✅ Perplexity provider initialized (with search capability)");
-            providers.insert(ProviderType::Perplexity, Box::new(perplexity));
-            if default_provider.is_none() {
-                default_provider = Some(ProviderType::Perplexity);
-                default_model = "sonar".to_string();
-            }
-        } else {
-            debug!("Perplexity provider not available (PERPLEXITY_API_KEY not set)");
+        // Only load Ollama if no other provider is available
+        if default_provider.is_none() {
+            let ollama = OllamaCloudClient::from_env();
+            info!("✅ Ollama provider initialized (fallback)");
+            providers.insert(ProviderType::Ollama, Box::new(ollama));
+            default_provider = Some(ProviderType::Ollama);
+            default_model = "llama3.2".to_string();
         }
 
         // =====================================================
-        // Anthropic - Premium pricing, highest quality
+        // Claude (Anthropic) - Premium models
         // =====================================================
         if let Ok(anthropic) = AnthropicClient::from_env() {
-            info!("✅ Anthropic provider initialized (premium quality)");
+            info!("✅ Claude provider initialized (Anthropic)");
             providers.insert(ProviderType::Anthropic, Box::new(anthropic));
-            // Don't set as default - it's the most expensive
         } else {
-            debug!("Anthropic provider not available (ANTHROPIC_API_KEY not set)");
+            debug!("Claude provider not available (ANTHROPIC_API_KEY not set)");
         }
+
+        // TODO: Add OpenAI provider for GPT-4 models
+        // Requires implementing openai.rs module in op-llm crate
+        // Will provide access to GPT-4, GPT-4-turbo, etc.
 
         let default_provider = default_provider.unwrap_or(ProviderType::Ollama);
         info!("\n📊 Default provider: {:?}", default_provider);

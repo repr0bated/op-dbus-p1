@@ -470,6 +470,29 @@ impl StreamingBlockchain {
         );
     }
 
+    /// Start a footprint receiver that processes incoming footprints
+    pub async fn start_footprint_receiver(
+        &self,
+        mut receiver: tokio::sync::mpsc::UnboundedReceiver<PluginFootprint>,
+    ) -> Result<()> {
+        info!("Starting blockchain footprint receiver");
+
+        while let Some(footprint) = receiver.recv().await {
+            if let Err(e) = self.add_footprint(footprint).await {
+                warn!("Failed to add footprint to blockchain: {}", e);
+                // Continue processing other footprints
+            }
+        }
+
+        info!("Blockchain footprint receiver stopped");
+        Ok(())
+    }
+
+    /// Write the current system state (for disaster recovery)
+    pub async fn write_current_state(&self, state: &serde_json::Value) -> Result<()> {
+        self.write_state("current", state).await
+    }
+
     /// Get base path
     pub fn base_path(&self) -> &Path {
         &self.base_path

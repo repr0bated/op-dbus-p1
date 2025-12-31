@@ -27,3 +27,4 @@ log = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 md5 = { workspace = true }
+uuid = { workspace = true }

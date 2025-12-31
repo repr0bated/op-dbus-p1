@@ -153,26 +153,44 @@ pub enum FlowAction {
 }
 
 /// Socket port for containerless networking
+/// 
+/// TWO TYPES:
+/// 1. Privacy sockets (predefined): priv_wg, priv_xray
+/// 2. Container sockets (dynamic): sock_{container_name}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketPort {
-    /// Port name (e.g., "internal_100" for container 100)
+    /// Port name:
+    /// - Privacy: "priv_wg", "priv_xray" (predefined)
+    /// - Container: "sock_{container_name}" (dynamic, created at runtime)
     pub name: String,
 
-    /// Container ID this port serves
-    pub container_id: String,
+    /// Container name this port serves (for sock_* ports)
+    pub container_name: Option<String>,
+
+    /// Port type: "privacy" or "container"
+    pub port_type: SocketPortType,
 
     /// OVS port number (assigned by OVS)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ofport: Option<u16>,
 }
 
+/// Type of socket port
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SocketPortType {
+    /// Privacy tunnel sockets (priv_wg, priv_xray) - predefined
+    Privacy,
+    /// Container sockets (sock_{name}) - dynamic, created from container name
+    Container,
+}
+
 /// Discovered container from OVSDB introspection
 #[derive(Debug, Clone)]
 struct DiscoveredContainer {
-    /// Container ID
-    id: String,
+    /// Container name (extracted from sock_{name} port)
+    name: String,
 
-    /// Port name in OVS
+    /// Port name in OVS (sock_{container_name})
     port_name: String,
 
     /// Bridge this container is attached to
@@ -212,7 +230,10 @@ impl OpenFlowPlugin {
         Ok(client)
     }
 
-    /// Discover containers from LXC plugin via OVSDB introspection
+    /// Discover containers from OVSDB introspection
+    /// 
+    /// Looks for sock_{container_name} ports (dynamic container sockets)
+    /// Privacy sockets (priv_wg, priv_xray) are NOT included - they are predefined
     async fn discover_containers(&self) -> Result<Vec<DiscoveredContainer>> {
         let mut containers = Vec::new();
 
@@ -224,36 +245,61 @@ impl OpenFlowPlugin {
             let ports = self.ovsdb_client.list_bridge_ports(&bridge).await?;
 
             for port in ports {
-                // Check if port matches container pattern (vi{VMID} or internal_{VMID})
-                if let Some(container_id) = Self::extract_container_id(&port) {
+                // Only discover container sockets (sock_*), not privacy sockets (priv_*)
+                if Self::is_container_socket(&port) {
+                    if let Some(container_name) = Self::extract_container_name(&port) {
                     containers.push(DiscoveredContainer {
-                        id: container_id.clone(),
+                            name: container_name,
                         port_name: port.clone(),
                         bridge: bridge.clone(),
                         ofport: self.get_port_ofport(&port).await.ok(),
                     });
+                    }
                 }
             }
         }
 
         log::info!(
-            "Discovered {} containers from OVS introspection",
+            "Discovered {} container sockets (sock_*) from OVS introspection",
             containers.len()
         );
         Ok(containers)
     }
 
-    /// Extract container ID from port name (vi100 -> 100, internal_100 -> 100)
-    fn extract_container_id(port_name: &str) -> Option<String> {
-        if port_name.starts_with("vi") {
-            // Proxmox veth pattern: vi100, vi200
+    /// Extract container name from port name
+    /// 
+    /// Port naming patterns:
+    /// - Privacy sockets: priv_wg, priv_xray (returns None - not container ports)
+    /// - Container sockets: sock_{container_name} (returns container name)
+    /// - Legacy veth: vi{VMID} (returns VMID for backwards compat)
+    fn extract_container_name(port_name: &str) -> Option<String> {
+        if port_name.starts_with("sock_") {
+            // Dynamic container socket: sock_vectordb-prod -> vectordb-prod
+            port_name.strip_prefix("sock_").map(|s| s.to_string())
+        } else if port_name.starts_with("vi") {
+            // Legacy Proxmox veth pattern: vi100 -> 100
             port_name.strip_prefix("vi").map(|s| s.to_string())
-        } else if port_name.starts_with("internal_") {
-            // Socket networking pattern: internal_100
-            port_name.strip_prefix("internal_").map(|s| s.to_string())
+        } else if port_name.starts_with("priv_") {
+            // Privacy sockets are not container ports
+            None
         } else {
             None
         }
+    }
+
+    /// Check if port is a privacy socket (priv_wg, priv_xray)
+    fn is_privacy_socket(port_name: &str) -> bool {
+        port_name == "priv_wg" || port_name == "priv_xray"
+    }
+
+    /// Check if port is a container socket (sock_*)
+    fn is_container_socket(port_name: &str) -> bool {
+        port_name.starts_with("sock_")
+    }
+
+    /// Generate socket port name from container name
+    pub fn socket_port_name(container_name: &str) -> String {
+        format!("sock_{}", container_name)
     }
 
     /// Get OpenFlow port number for a port name
@@ -294,7 +340,7 @@ impl OpenFlowPlugin {
                     generated_flows.push(flow);
                     log::debug!(
                         "Generated flow for container {} from policy '{}'",
-                        container.id,
+                        container.name,
                         policy.name
                     );
                 }
@@ -317,7 +363,7 @@ impl OpenFlowPlugin {
 
         if selector.starts_with("container:") {
             let pattern = selector.strip_prefix("container:").unwrap();
-            return Self::container_id_matches(pattern, &container.id);
+            return Self::container_name_matches(pattern, &container.name);
         } else if selector.starts_with("port:") {
             let pattern = selector.strip_prefix("port:").unwrap();
             return Self::port_name_matches(pattern, &container.port_name);
@@ -326,27 +372,26 @@ impl OpenFlowPlugin {
         false
     }
 
-    /// Check if container ID matches pattern (*, 100, 100-199)
-    fn container_id_matches(pattern: &str, container_id: &str) -> bool {
+    /// Check if container name matches pattern (*, exact, prefix*)
+    fn container_name_matches(pattern: &str, container_name: &str) -> bool {
         if pattern == "*" {
             return true;
         }
 
-        if pattern == container_id {
+        if pattern == container_name {
             return true;
         }
 
-        // Range pattern: 100-199
-        if pattern.contains('-') {
-            if let Some((start, end)) = pattern.split_once('-') {
-                if let (Ok(start_num), Ok(end_num), Ok(id_num)) = (
-                    start.parse::<u32>(),
-                    end.parse::<u32>(),
-                    container_id.parse::<u32>(),
-                ) {
-                    return id_num >= start_num && id_num <= end_num;
-                }
-            }
+        // Prefix pattern: vectordb* matches vectordb-prod, vectordb-dev
+        if pattern.ends_with('*') {
+            let prefix = pattern.trim_end_matches('*');
+            return container_name.starts_with(prefix);
+        }
+
+        // Suffix pattern: *-prod matches vectordb-prod, redis-prod
+        if pattern.starts_with('*') {
+            let suffix = pattern.trim_start_matches('*');
+            return container_name.ends_with(suffix);
         }
 
         false
@@ -396,15 +441,26 @@ impl OpenFlowPlugin {
             priority: template.priority,
             match_fields,
             actions,
-            cookie: Some(container.id.parse::<u64>().unwrap_or(0)),
+            // Use hash of container name for cookie since names aren't numeric
+            cookie: Some(Self::hash_container_name(&container.name)),
             idle_timeout: 0,
             hard_timeout: 0,
         })
     }
 
-    /// Substitute variables in string ({container_id}, {port_name}, {bridge})
+    /// Generate a numeric hash from container name for flow cookie
+    fn hash_container_name(name: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Substitute variables in string ({container_name}, {port_name}, {bridge})
     fn substitute_variables(text: &str, container: &DiscoveredContainer) -> String {
-        text.replace("{container_id}", &container.id)
+        text.replace("{container_name}", &container.name)
+            .replace("{container_id}", &container.name) // backwards compat
             .replace("{port_name}", &container.port_name)
             .replace("{bridge}", &container.bridge)
     }
@@ -604,10 +660,10 @@ impl OpenFlowPlugin {
     /// Create OVS internal port for socket networking
     async fn create_socket_port(&self, bridge: &str, port: &SocketPort) -> Result<()> {
         log::info!(
-            "Creating socket port {} on {} for container {}",
+            "Creating socket port {} on {} for container {:?}",
             port.name,
             bridge,
-            port.container_id
+            port.container_name.as_deref().unwrap_or("(privacy)")
         );
 
         // Add internal port to OVS bridge
@@ -1195,8 +1251,9 @@ impl StatePlugin for OpenFlowPlugin {
                 .filter(|c| c.bridge == *bridge)
                 .map(|c| SocketPort {
                     name: c.port_name.clone(),
-                    container_id: c.id.clone(),
-                    ofport: c.ofport.map(|n| n as u16),
+                    container_name: Some(c.name.clone()),
+                    port_type: SocketPortType::Container,
+                    ofport: c.ofport,
                 })
                 .collect();
 

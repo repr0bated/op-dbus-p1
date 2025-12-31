@@ -19,7 +19,7 @@ pub mod plugin_workflow;
 pub mod plugtree;
 pub mod schema_validator;
 
-pub use manager::StateManager;
+pub use manager::{StateManager, FootprintSender};
 pub use plugin::{
     ApplyResult, Checkpoint, DiffMetadata, PluginCapabilities, StateAction, StateDiff, StatePlugin,
 };

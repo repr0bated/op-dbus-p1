@@ -1,9 +1,10 @@
 // State manager orchestrator - coordinates plugins and provides atomic operations
 // ULTIMATE AUTHORITY: This plugin system is the sole authoritative source for network configuration
 // All external systems (NetworkManager, systemd-networkd, etc.) are subordinate data sources only
-// Note: Ledger functionality has been replaced with streaming blockchain
+// Note: Footprints are now streamed to the blockchain for audit/DR
 use crate::plugin::{ApplyResult, Checkpoint, StateDiff, StatePlugin};
 use anyhow::{anyhow, Result};
+use op_blockchain::PluginFootprint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,8 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-// use crate::blockchain::plugin_footprint::FootprintGenerator;
-// type FootprintSender = tokio::sync::mpsc::UnboundedSender<crate::blockchain::PluginFootprint>;
+/// Type alias for the footprint sender channel
+pub type FootprintSender = tokio::sync::mpsc::UnboundedSender<PluginFootprint>;
 
 /// Desired state loaded from YAML/JSON
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +40,7 @@ pub struct ApplyReport {
 pub struct StateManager {
     plugins: Arc<RwLock<HashMap<String, Arc<dyn StatePlugin>>>>,
     workflows: std::sync::Mutex<crate::plugin_workflow::PluginWorkflowManager>,
-    // blockchain_sender: Option<FootprintSender>,
+    blockchain_sender: Option<FootprintSender>,
 }
 
 impl Default for StateManager {
@@ -54,33 +55,30 @@ impl StateManager {
         Self {
             plugins: Arc::new(RwLock::new(HashMap::new())),
             workflows: std::sync::Mutex::new(crate::plugin_workflow::PluginWorkflowManager::new()),
-            // blockchain_sender: None,
+            blockchain_sender: None,
         }
     }
 
-    // Enable blockchain footprints by providing a sender to a StreamingBlockchain receiver
-    /*
+    /// Enable blockchain footprints by providing a sender to a StreamingBlockchain receiver
     pub fn set_blockchain_sender(&mut self, sender: FootprintSender) {
+        log::info!("Blockchain footprint recording enabled");
         self.blockchain_sender = Some(sender);
     }
-    */
 
-    // Record a hashed footprint for a plugin operation (best-effort)
-    /*
+    /// Check if blockchain recording is enabled
+    pub fn is_blockchain_enabled(&self) -> bool {
+        self.blockchain_sender.is_some()
+    }
+
+    /// Record a hashed footprint for a plugin operation (best-effort, non-blocking)
     fn record_footprint(&self, plugin: &str, operation: &str, data: serde_json::Value) {
         if let Some(tx) = &self.blockchain_sender {
-            let gen = FootprintGenerator::new(plugin);
-            match gen.create_footprint(operation, &data, None) {
-                Ok(fp) => {
-                    let _ = tx.send(fp);
-                }
-                Err(e) => {
-                    log::debug!("Failed to create footprint for {}: {}", plugin, e);
-                }
+            let footprint = PluginFootprint::new(plugin, operation, &data);
+            if let Err(e) = tx.send(footprint) {
+                log::debug!("Failed to send footprint for {}: {}", plugin, e);
             }
         }
     }
-    */
 
     /// Register a state plugin
     pub async fn register_plugin(&self, plugin: Arc<dyn StatePlugin>) {
@@ -310,7 +308,7 @@ impl StateManager {
                     );
 
                     // Record blockchain footprint (apply)
-                    let _data = serde_json::json!({
+                    let data = serde_json::json!({
                         "plugin": diff.plugin,
                         "actions": diff.actions,
                         "metadata": diff.metadata,
@@ -320,7 +318,7 @@ impl StateManager {
                             "errors": result.errors,
                         }
                     });
-                    // self.record_footprint(&diff.plugin, "apply", data);
+                    self.record_footprint(&diff.plugin, "apply", data);
 
                     // Check if result indicates failure
                     if !result.success {
@@ -352,13 +350,13 @@ impl StateManager {
                     });
 
                     // Record failure footprint
-                    let _data = serde_json::json!({
+                    let data = serde_json::json!({
                         "plugin": diff.plugin,
                         "actions": diff.actions,
                         "metadata": diff.metadata,
                         "error": e.to_string(),
                     });
-                    // self.record_footprint(&diff.plugin, "apply_error", data);
+                    self.record_footprint(&diff.plugin, "apply_error", data);
                 }
                 None => {
                     log::error!("Plugin {} not found during apply phase", diff.plugin);
@@ -370,13 +368,13 @@ impl StateManager {
                     });
 
                     // Record missing plugin footprint
-                    let _data = serde_json::json!({
+                    let data = serde_json::json!({
                         "plugin": diff.plugin,
                         "actions": diff.actions,
                         "metadata": diff.metadata,
                         "error": "plugin_not_found",
                     });
-                    // self.record_footprint(&diff.plugin, "apply_missing_plugin", data);
+                    self.record_footprint(&diff.plugin, "apply_missing_plugin", data);
                 }
             }
         }

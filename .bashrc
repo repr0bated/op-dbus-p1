@@ -9,7 +9,7 @@ echo "Setting up Google Cloud ADC and API keys..."
 export GOOGLE_CLOUD_PROJECT="geminidev-479406"
 export GOOGLE_CLOUD_LOCATION="global"
 export GOOGLE_GENAI_USE_VERTEXAI=true
-export GOOGLE_GENAI_MODEL="gemini-3-pro-preview"
+export GOOGLE_GENAI_MODEL="gemini-1.5-pro"
 
 # Source API key from ~/.bashrc if it exists
 if [ -f ~/.bashrc ]; then
@@ -37,6 +37,10 @@ export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 export PERPLEXITY_API_KEY="${PERPLEXITY_API_KEY:-}"
 export HF_TOKEN="${HF_TOKEN:-}"
+
+# Self-Repository Path - Defines the chatbot's own source code location
+# This gives the chatbot tools to read, modify, commit, and deploy its own code
+export OP_SELF_REPO_PATH="/home/jeremy/git/op-dbus-v2"
 
 # Additional Google Cloud Environment Variables
 export GOOGLE_CLOUD_STORAGE_BUCKET="${GOOGLE_CLOUD_STORAGE_BUCKET:-}"

@@ -18,17 +18,20 @@
 //! - **D-Bus Tools**: Native protocol access to system services
 //! - **OVS Tools**: Native OVSDB JSON-RPC for Open vSwitch
 //! - **Response Tools**: LLM response handling for anti-hallucination
+//! - **Self Tools**: Git and code editing for the chatbot's own source code
 
 mod dbus;
 mod dbus_introspection;
 mod ovs_tools;
+mod openflow_tools;
 mod packagekit;
+mod rtnetlink_tools;
 mod shell;
 mod agent_tool;
 mod file;
 mod procfs;
-mod git_tool;
 pub mod response_tools;
+pub mod self_tools;
 
 // Re-exports
 pub use agent_tool::{create_agent_tool, create_agent_tool_with_executor, AgentTool};
@@ -36,6 +39,7 @@ pub use file::{FileTool, SecureFileTool};
 pub use procfs::{ProcFsReadTool, ProcFsWriteTool, SysFsReadTool, SysFsWriteTool};
 pub use shell::register_shell_tools;
 pub use ovs_tools::register_ovs_tools;
+pub use self_tools::{create_self_tools, get_self_repo_system_context};
 
 use crate::ToolRegistry;
 use std::sync::Arc;
@@ -50,6 +54,7 @@ use tracing::{debug, info};
 /// - D-Bus tools (systemd, introspection)
 /// - OVS tools (native OVSDB)
 /// - Response tools (respond_to_user, cannot_perform, request_clarification)
+/// - Self tools (git, code editing for own source - if OP_SELF_REPO_PATH is set)
 pub async fn register_response_tools(registry: &ToolRegistry) -> anyhow::Result<()> {
     info!("Registering built-in tools with security controls");
 
@@ -85,15 +90,29 @@ pub async fn register_response_tools(registry: &ToolRegistry) -> anyhow::Result<
     ovs_tools::register_ovs_tools(registry).await?;
     debug!("Registered OVS tools");
 
+    // OpenFlow tools (native OpenFlow protocol)
+    openflow_tools::register_openflow_tools(registry).await?;
+    debug!("Registered OpenFlow tools");
+
+    // Rtnetlink tools (native network interface management)
+    rtnetlink_tools::register_rtnetlink_tools(registry).await?;
+    debug!("Registered rtnetlink tools");
+
     // Response tools (for anti-hallucination)
     for tool in response_tools::create_response_tools() {
         registry.register_tool(tool).await?;
     }
     debug!("Registered response tools");
 
-    // Git tools (structured git operations)
-    git_tool::register_git_tools(registry).await?;
-    debug!("Registered git tools");
+    // Self-repository tools (if OP_SELF_REPO_PATH is configured)
+    if op_core::self_identity::is_self_repo_configured() {
+        for tool in self_tools::create_self_tools() {
+            registry.register_tool(tool).await?;
+        }
+        info!("Registered self-repository tools - chatbot can modify its own code");
+    } else {
+        debug!("Self-repository tools not registered (OP_SELF_REPO_PATH not set)");
+    }
 
     info!("Built-in tool registration complete");
     Ok(())

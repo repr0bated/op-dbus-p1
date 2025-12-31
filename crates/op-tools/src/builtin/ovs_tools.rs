@@ -81,9 +81,35 @@ impl Tool for OvsListBridgesTool {
 
     async fn execute(&self, _input: Value) -> Result<Value> {
         use op_network::OvsdbClient;
+        use tokio::process::Command;
 
-        let bridges = OvsdbClient::new().list_bridges().await?;
-        Ok(json!({ "bridges": bridges }))
+        // Try native client first
+        match OvsdbClient::new().list_bridges().await {
+            Ok(bridges) => Ok(json!({ "bridges": bridges, "method": "native_ovsdb" })),
+            Err(e) => {
+                // Fallback to CLI
+                let output = Command::new("sudo")
+                    .args(&["ovs-vsctl", "list-br"])
+                    .output()
+                    .await;
+
+                match output {
+                    Ok(out) if out.status.success() => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let bridges: Vec<&str> = stdout.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                        Ok(json!({ 
+                            "bridges": bridges, 
+                            "method": "cli_fallback",
+                            "native_error": e.to_string()
+                        }))
+                    }
+                    _ => {
+                        // Return original error if fallback also failed
+                        Err(e)
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -15,6 +15,8 @@ op-http = { path = "../crates/op-http" }
 op-agents = { path = "../crates/op-agents" }
 op-execution-tracker = { path = "../crates/op-execution-tracker" }
 op-state = { path = "../crates/op-state" }
+op-blockchain = { path = "../crates/op-blockchain" }
+op-plugins = { path = "../crates/op-plugins" }
 
 # Third-party
 tokio = { workspace = true, features = ["full"] }

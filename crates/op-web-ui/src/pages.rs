@@ -99,6 +99,12 @@ pub fn ChatPage() -> impl IntoView {
 
     view! {
         <div class="chat-page">
+            <div class="chat-header">
+                <div class="model-info">
+                    <span class="provider-badge">{move || app_state.get().current_provider}</span>
+                    <span class="model-name">{move || app_state.get().current_model}</span>
+                </div>
+            </div>
             <div class="messages-container">
                 {move || error.get().map(|e| view! { <ErrorDisplay message=e/> })}
                 

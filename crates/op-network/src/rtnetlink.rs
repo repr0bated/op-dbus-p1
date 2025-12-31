@@ -2,8 +2,195 @@
 
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
+use netlink_packet_route::link::LinkAttribute;
 use rtnetlink::{new_connection, IpVersion};
+use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
+
+/// Network interface information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub index: u32,
+    pub mac_address: Option<String>,
+    pub mtu: Option<u32>,
+    pub flags: Vec<String>,
+    pub state: String,
+    pub kind: Option<String>,
+    pub addresses: Vec<InterfaceAddress>,
+}
+
+/// IP address on an interface
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceAddress {
+    pub address: String,
+    pub prefix_len: u8,
+    pub family: String,
+}
+
+/// List all network interfaces with their details
+pub async fn list_interfaces() -> Result<Vec<NetworkInterface>> {
+    let (connection, handle, _) = new_connection()?;
+    tokio::spawn(connection);
+
+    let mut interfaces = Vec::new();
+    let mut links = handle.link().get().execute();
+
+    while let Some(link) = links.try_next().await? {
+        let index = link.header.index;
+        let mut name = String::new();
+        let mut mac_address = None;
+        let mut mtu = None;
+        let mut kind = None;
+
+        // Extract attributes
+        for attr in &link.attributes {
+            match attr {
+                LinkAttribute::IfName(n) => name = n.clone(),
+                LinkAttribute::Address(addr) => {
+                    mac_address = Some(
+                        addr.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(":"),
+                    );
+                }
+                LinkAttribute::Mtu(m) => mtu = Some(*m),
+                LinkAttribute::LinkInfo(infos) => {
+                    for info in infos {
+                        if let netlink_packet_route::link::LinkInfo::Kind(k) = info {
+                            kind = Some(format!("{:?}", k));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Determine state from flags
+        let flags = link.header.flags.iter().map(|f| format!("{:?}", f)).collect::<Vec<_>>();
+        let state = if flags.iter().any(|f| f.contains("Up")) {
+            "up".to_string()
+        } else {
+            "down".to_string()
+        };
+
+        // Get addresses for this interface
+        let addresses = match get_interface_addresses(&handle, index).await {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                log::warn!("Failed to get addresses for interface {}: {}", name, e);
+                Vec::new()
+            }
+        };
+
+        interfaces.push(NetworkInterface {
+            name,
+            index,
+            mac_address,
+            mtu,
+            flags,
+            state,
+            kind,
+            addresses,
+        });
+    }
+
+    Ok(interfaces)
+}
+
+/// Get addresses for a specific interface
+async fn get_interface_addresses(
+    handle: &rtnetlink::Handle,
+    ifindex: u32,
+) -> Result<Vec<InterfaceAddress>> {
+    use netlink_packet_route::AddressFamily;
+    
+    let mut addresses = Vec::new();
+    let mut addr_stream = handle
+        .address()
+        .get()
+        .set_link_index_filter(ifindex)
+        .execute();
+
+    while let Some(addr_msg) = addr_stream.try_next().await? {
+        let family = match addr_msg.header.family {
+            AddressFamily::Inet => "inet".to_string(),
+            AddressFamily::Inet6 => "inet6".to_string(),
+            f => format!("family:{:?}", f),
+        };
+
+        for attr in &addr_msg.attributes {
+            if let netlink_packet_route::address::AddressAttribute::Address(addr) = attr {
+                let addr_str = match addr {
+                    std::net::IpAddr::V4(v4) => v4.to_string(),
+                    std::net::IpAddr::V6(v6) => v6.to_string(),
+                };
+                addresses.push(InterfaceAddress {
+                    address: addr_str,
+                    prefix_len: addr_msg.header.prefix_len,
+                    family: family.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(addresses)
+}
+
+
+/// Get default route information
+pub async fn get_default_route() -> Result<Option<serde_json::Value>> {
+    use netlink_packet_route::route::RouteAttribute;
+    
+    let (connection, handle, _) = new_connection()?;
+    tokio::spawn(connection);
+
+    let mut routes = handle.route().get(IpVersion::V4).execute();
+
+    while let Some(route) = routes.try_next().await? {
+        // Check if this is a default route (destination 0.0.0.0/0)
+        if route.header.destination_prefix_length == 0 {
+            let mut gateway = None;
+            let mut oif_index = None;
+
+            for attr in &route.attributes {
+                match attr {
+                    RouteAttribute::Gateway(gw) => {
+                        gateway = Some(format!("{:?}", gw));
+                    }
+                    RouteAttribute::Oif(idx) => {
+                        oif_index = Some(*idx);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Try to get interface name for the output interface
+            let mut oif_name = None;
+            if let Some(idx) = oif_index {
+                let mut links = handle.link().get().match_index(idx).execute();
+                if let Some(link) = links.try_next().await? {
+                    for attr in &link.attributes {
+                        if let LinkAttribute::IfName(name) = attr {
+                            oif_name = Some(name.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return Ok(Some(serde_json::json!({
+                "gateway": gateway,
+                "interface_index": oif_index,
+                "interface_name": oif_name,
+                "destination": "0.0.0.0/0",
+            })));
+        }
+    }
+
+    Ok(None)
+}
 
 /// Add IPv4 address to interface
 pub async fn add_ipv4_address(ifname: &str, ip: &str, prefix: u8) -> Result<()> {

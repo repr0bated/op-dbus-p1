@@ -43,5 +43,8 @@ axum = { workspace = true }
 op-state = { workspace = true }
 lazy_static = { workspace = true }
 
+# Async recursion for self-tools
+async-recursion = "1.0"
+
 [dev-dependencies]
 tokio-test = "0.4"

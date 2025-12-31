@@ -77,6 +77,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment from /etc/op-dbus/environment (if exists)
+    op_core::config::load_environment();
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -99,15 +102,74 @@ async fn main() -> Result<()> {
     op_tools::register_builtin_tools(&registry).await?;
     info!("Initialized Tool Registry");
 
-    // State Manager
-    let state_manager = Arc::new(StateManager::new());
-    info!("Initialized State Manager");
+    // --- 2. Initialize Streaming Blockchain ---
+    let blockchain_path = std::env::var("OP_BLOCKCHAIN_PATH")
+        .unwrap_or_else(|_| "/var/lib/op-dbus/blockchain".to_string());
+    
+    let blockchain = match op_blockchain::StreamingBlockchain::new(&blockchain_path).await {
+        Ok(bc) => {
+            info!("Initialized StreamingBlockchain at {}", blockchain_path);
+            Some(Arc::new(bc))
+        }
+        Err(e) => {
+            error!("Failed to initialize blockchain at {}: {} - continuing without blockchain", blockchain_path, e);
+            None
+        }
+    };
+
+    // Create footprint channel
+    let (footprint_tx, footprint_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // State Manager with blockchain integration
+    let mut state_manager = StateManager::new();
+    state_manager.set_blockchain_sender(footprint_tx.clone());
+    
+    // Register the Full System Plugin for complete state capture
+    let full_system_plugin = Arc::new(op_plugins::state_plugins::FullSystemPlugin::new());
+    state_manager.register_plugin(full_system_plugin).await;
+    info!("Registered FullSystemPlugin for disaster recovery");
+    
+    let state_manager = Arc::new(state_manager);
+
+    // Start blockchain footprint receiver if blockchain is available
+    let blockchain_handle = if let Some(bc) = blockchain.clone() {
+        let bc_clone = bc.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = bc_clone.start_footprint_receiver(footprint_rx).await {
+                error!("Blockchain footprint receiver error: {}", e);
+            }
+        }))
+    } else {
+        // Drain the channel if no blockchain
+        tokio::spawn(async move {
+            let mut rx = footprint_rx;
+            while rx.recv().await.is_some() {
+                // Discard footprints when blockchain is not available
+            }
+        });
+        None
+    };
+    
+    if blockchain_handle.is_some() {
+        info!("Blockchain footprint recording enabled - changes will be tracked for DR");
+    }
 
     // Handle CLI commands if present
     if let Some(Commands::SetDesiredState { path }) = args.command {
         info!("Setting desired state from {:?}", path);
         let desired_state = state_manager.load_desired_state(&path).await?;
         let report = state_manager.apply_state(desired_state).await?;
+        
+        // Update blockchain state after apply
+        if let Some(bc) = &blockchain {
+            if let Ok(current_state) = state_manager.query_current_state().await {
+                let state_value = serde_json::to_value(&current_state)?;
+                if let Err(e) = bc.write_current_state(&state_value).await {
+                    error!("Failed to update blockchain state: {}", e);
+                }
+            }
+        }
+        
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }

@@ -9,11 +9,11 @@ Requires=dbus.socket
 Type=simple
 User=jeremy
 Group=jeremy
-WorkingDirectory=/home/jeremy/op-dbus-v2
-EnvironmentFile=/home/jeremy/.op-web.env
+WorkingDirectory=/home/jeremy/git/op-dbus-v2
+EnvironmentFile=/home/jeremy/git/op-dbus-v2/.env
 
 # Main process
-ExecStart=/home/jeremy/op-dbus-v2/target/release/op-web-server
+ExecStart=/usr/local/sbin/op-web-server
 
 # Restart policy
 Restart=always
@@ -23,14 +23,14 @@ StartLimitBurst=3
 
 # Security hardening
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
+ProtectSystem=full
+ProtectHome=false
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictNamespaces=true
+# RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
@@ -52,8 +52,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=op-web
 
-# Watchdog (optional)
-WatchdogSec=60
+# Watchdog disabled - LLM requests can take >60s with multi-step tool execution
+# WatchdogSec=60
 
 [Install]
 WantedBy=multi-user.target

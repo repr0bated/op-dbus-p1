@@ -358,6 +358,28 @@ pub struct OpenFlowFeaturesReply {
 }
 
 impl OpenFlowFeaturesReply {
+    /// Get datapath ID
+    pub fn datapath_id(&self) -> u64 {
+        self.datapath_id
+    }
+
+    /// Get number of buffers
+    pub fn n_buffers(&self) -> u32 {
+        self.n_buffers
+    }
+
+    /// Get number of tables
+    pub fn n_tables(&self) -> u8 {
+        self.n_tables
+    }
+
+    /// Get capabilities bitmask
+    pub fn capabilities(&self) -> u32 {
+        self.capabilities
+    }
+}
+
+impl OpenFlowFeaturesReply {
     fn from_bytes(xid: u32, payload: &[u8]) -> Result<Self> {
         if payload.len() < 24 {
             return Err(anyhow::anyhow!("Features reply payload too short"));
