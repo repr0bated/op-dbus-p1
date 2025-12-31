@@ -1,0 +1,99 @@
+//! op-mcp-aggregator: MCP Server Aggregator
+//!
+//! This crate provides an aggregator that proxies multiple upstream MCP servers,
+//! presenting a unified tool interface while staying under Cursor's 40-tool limit.
+//!
+//! ## Modes
+//!
+//! ### Full Mode (Traditional)
+//! Exposes all tools directly. Good for small tool sets (<40 tools).
+//!
+//! ### Compact Mode (Recommended)
+//! Reduces 750+ tools to 4-5 meta-tools:
+//! - `list_tools` - Browse available tools
+//! - `search_tools` - Find tools by keyword  
+//! - `get_tool_schema` - Get input schema for a tool
+//! - `execute_tool` - Execute any tool by name
+//!
+//! Benefits:
+//! - ~95% context token savings
+//! - Bypasses 40-tool limit entirely
+//! - Works with Cursor, Gemini CLI, and any MCP client
+//! - All tools remain accessible via execute_tool
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    op-mcp-aggregator                        │
+//! │  ┌───────────────────────────────────────────────────────┐  │
+//! │  │              Mode: Compact / Full                     │  │
+//! │  │  Compact: 4 meta-tools (list, search, schema, exec)  │  │
+//! │  │  Full: All tools from all servers                     │  │
+//! │  └───────────────────────────────────────────────────────┘  │
+//! │                           │                                  │
+//! │  ┌───────────────────────────────────────────────────────┐  │
+//! │  │              Profile Manager                          │  │
+//! │  │  /profile/sysadmin → [systemd, network, dbus]        │  │
+//! │  │  /profile/dev      → [github, filesystem, shell]     │  │
+//! │  └───────────────────────────────────────────────────────┘  │
+//! │                           │                                  │
+//! │  ┌───────────────────────────────────────────────────────┐  │
+//! │  │              Upstream Registry                        │  │
+//! │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐     │  │
+//! │  │  │ GitHub  │ │ Postgres│ │ Custom  │ │ Local   │     │  │
+//! │  │  │ MCP     │ │ MCP     │ │ Server  │ │ Tools   │     │  │
+//! │  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘     │  │
+//! │  └───────────────────────────────────────────────────────┘  │
+//! │                           │                                  │
+//! │  ┌───────────────────────────────────────────────────────┐  │
+//! │  │              Tool Cache (LRU + TTL)                   │  │
+//! │  └───────────────────────────────────────────────────────┘  │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use op_mcp_aggregator::{Aggregator, AggregatorConfig, ToolMode};
+//!
+//! let config = AggregatorConfig::load("/etc/op-dbus/aggregator.json")?;
+//! let aggregator = Aggregator::new(config).await?;
+//! aggregator.initialize().await?;
+//!
+//! // Get MCP tools (compact mode returns 4 meta-tools)
+//! let mcp_tools = aggregator.get_mcp_tools(ToolMode::Compact).await?;
+//!
+//! // Or use full mode for direct tool access
+//! let all_tools = aggregator.get_mcp_tools(ToolMode::Full).await?;
+//! ```
+
+pub mod client;
+pub mod config;
+pub mod profile;
+pub mod aggregator;
+pub mod cache;
+pub mod compact;
+pub mod groups;
+pub mod context;
+
+// Re-exports
+pub use aggregator::{Aggregator, ToolMode, AggregatorStats, HealthStatus};
+pub use config::{AggregatorConfig, UpstreamServer, ProfileConfig};
+pub use profile::ProfileManager;
+pub use client::McpClient;
+pub use cache::ToolCache;
+pub use compact::{CompactModeConfig, create_compact_tools, compact_mode_summary};
+pub use groups::{ToolGroups, ToolGroup, GroupStatus, SecurityLevel, AccessZone, NetworkConfig, builtin_groups, builtin_presets};
+pub use context::{ContextAwareTools, ConversationContext, ContextSuggestion};
+
+/// Prelude for convenient imports
+pub mod prelude {
+    pub use super::{
+        Aggregator, AggregatorConfig, UpstreamServer, ProfileConfig,
+        ProfileManager, McpClient, ToolCache, ToolMode,
+        CompactModeConfig, create_compact_tools,
+        ToolGroups, ToolGroup, builtin_groups, builtin_presets,
+        ContextAwareTools, ConversationContext,
+    };
+}

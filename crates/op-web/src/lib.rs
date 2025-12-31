@@ -27,12 +27,15 @@
 
 pub mod handlers;
 pub mod mcp;
+pub mod mcp_picker;
+pub mod groups_admin;
 pub mod orchestrator;
 pub mod routes;
 pub mod sse;
 pub mod state;
 pub mod websocket;
 
+pub use mcp_picker::CUSTOM_PROFILES;
 pub use orchestrator::UnifiedOrchestrator;
 pub use state::AppState;
 

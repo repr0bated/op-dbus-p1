@@ -16,6 +16,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod handlers;
 mod mcp;
+mod mcp_picker;
+mod groups_admin;
 mod orchestrator;
 mod routes;
 mod sse;
@@ -27,6 +29,9 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load environment from /etc/op-dbus/environment (if exists)
+    op_core::config::load_environment();
+
     // Initialize logging with environment filter
     tracing_subscriber::registry()
         .with(fmt::layer().compact())
@@ -82,15 +87,19 @@ async fn main() -> anyhow::Result<()> {
 │  🌐 Web UI:        http://localhost:{:<5}                      │
 │  📡 REST API:      http://localhost:{:<5}/api/                 │
 │  💬 WebSocket:     ws://localhost:{:<5}/ws                     │
-│  🔧 MCP Endpoint:  http://localhost:{:<5}/mcp                  │
 │  📊 Health:        http://localhost:{:<5}/api/health           │
 │                                                                 │
-│  Claude Desktop Config:                                         │
-│  http://localhost:{:<5}/api/mcp/_config/claude                 │
+│  🔧 MCP Tool Picker:                                            │
+│     http://localhost:{:<5}/mcp-picker                          │
+│                                                                 │
+│  📋 MCP Endpoints:                                              │
+│     Profiles:  /mcp/profiles                                    │
+│     Custom:    /mcp/custom/{{name}}                               │
+│     Discover:  /mcp/_discover                                   │
 │                                                                 │
 │  Press Ctrl+C to stop                                           │
 └─────────────────────────────────────────────────────────────────┘
-"#, port, port, port, port, port, port);
+"#, port, port, port, port, port);
 
     // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(addr).await?;

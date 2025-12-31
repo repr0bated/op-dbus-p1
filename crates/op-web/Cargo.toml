@@ -19,6 +19,10 @@ op-tools = { workspace = true }
 op-agents = { workspace = true }
 op-state = { workspace = true }
 op-network = { workspace = true }
+op-mcp-aggregator = { path = "../op-mcp-aggregator" }
+
+# Rate limiting
+tower_governor = "0.4"
 
 # Web framework
 axum = { workspace = true, features = ["ws", "macros"] }
@@ -48,3 +52,4 @@ thiserror = { workspace = true }
 # System info
 sysinfo = "0.30"
 gethostname = { workspace = true }
+lazy_static = "1.4"

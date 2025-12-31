@@ -2,13 +2,27 @@
 //!
 //! Provides JSON-RPC 2.0 protocol handling for Model Context Protocol.
 //! This is a thin adapter that translates MCP requests to op-chat RPC calls.
+//!
+//! ## Compact Mode
+//!
+//! When a client like Gemini CLI connects, compact mode is auto-detected.
+//! Instead of exposing all tools, only 4 meta-tools are exposed:
+//! - list_tools, search_tools, get_tool_schema, execute_tool
+//!
+//! This saves ~95% of context tokens while keeping all tools accessible.
 
 use op_chat::{ChatActorHandle, RpcRequest, RpcResponse};
+use op_mcp_aggregator::{
+    AggregatorConfig, Aggregator, ToolMode,
+    config::ClientDetectionConfig,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use tracing::{debug, error};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::resources::ResourceRegistry;
@@ -59,16 +73,57 @@ pub struct McpServer {
     chat_handle: ChatActorHandle,
     allowed_namespaces: AllowedNamespaces,
     resource_registry: ResourceRegistry,
+    /// Client detection configuration
+    client_detection: ClientDetectionConfig,
+    /// Current client info (set during initialize)
+    client_info: RwLock<Option<ClientInfo>>,
+    /// Detected tool mode for current session
+    tool_mode: RwLock<ToolMode>,
+    /// Aggregator for compact mode (lazy initialized)
+    aggregator: RwLock<Option<Arc<Aggregator>>>,
+}
+
+/// Client information from MCP initialize
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: Option<String>,
 }
 
 impl McpServer {
     /// Create new MCP server with ChatActor handle
     pub fn new(chat_handle: ChatActorHandle, resource_registry: ResourceRegistry) -> Self {
+        let client_detection = ClientDetectionConfig::default();
+        let default_mode = if client_detection.default_mode == "full" {
+            ToolMode::Full
+        } else {
+            ToolMode::Compact
+        };
+        
         Self {
             chat_handle,
             allowed_namespaces: AllowedNamespaces::from_env(),
             resource_registry,
+            client_detection,
+            client_info: RwLock::new(None),
+            tool_mode: RwLock::new(default_mode),
+            aggregator: RwLock::new(None),
         }
+    }
+    
+    /// Get the current tool mode
+    pub async fn get_tool_mode(&self) -> ToolMode {
+        *self.tool_mode.read().await
+    }
+    
+    /// Check if running in compact mode
+    pub async fn is_compact_mode(&self) -> bool {
+        matches!(*self.tool_mode.read().await, ToolMode::Compact)
+    }
+    
+    /// Get client info if set
+    pub async fn get_client_info(&self) -> Option<ClientInfo> {
+        self.client_info.read().await.clone()
     }
 
     /// Handle incoming MCP request and return response
@@ -94,6 +149,49 @@ impl McpServer {
     /// Handle MCP initialize request
     async fn handle_initialize(&self, request: McpRequest) -> McpResponse {
         debug!("MCP initialize request");
+        
+        // Extract client info from params
+        let client_name = request.params
+            .as_ref()
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        
+        let client_version = request.params
+            .as_ref()
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("version"))
+            .and_then(|v| v.as_str());
+        
+        // Store client info
+        *self.client_info.write().await = Some(ClientInfo {
+            name: client_name.to_string(),
+            version: client_version.map(String::from),
+        });
+        
+        // Auto-detect tool mode based on client
+        let detected_mode = self.client_detection.detect_mode(client_name);
+        *self.tool_mode.write().await = detected_mode;
+        
+        // Log detection result
+        let mode_str = match detected_mode {
+            ToolMode::Compact => "COMPACT (4 meta-tools)",
+            ToolMode::Full => "FULL (all tools)",
+            ToolMode::Hybrid => "HYBRID (essential + meta)",
+        };
+        
+        info!(
+            "🔌 Client connected: {} v{} -> {} mode",
+            client_name,
+            client_version.unwrap_or("?"),
+            mode_str
+        );
+        
+        // Check if Gemini CLI specifically
+        if ClientDetectionConfig::is_gemini(client_name) {
+            info!("🔷 Gemini CLI detected! Using optimized compact mode.");
+        }
 
         // Return server capabilities
         let capabilities = json!({
@@ -109,7 +207,9 @@ impl McpServer {
             "serverInfo": {
                 "name": "op-mcp",
                 "version": "0.2.0",
-                "description": "MCP adapter for op-dbus-v2 system"
+                "description": "MCP adapter for op-dbus-v2 system",
+                "mode": format!("{:?}", detected_mode).to_lowercase(),
+                "compact_mode": matches!(detected_mode, ToolMode::Compact)
             }
         });
 
@@ -124,7 +224,15 @@ impl McpServer {
     /// Handle MCP tools/list request
     async fn handle_tools_list(&self, request: McpRequest) -> McpResponse {
         debug!("MCP tools/list request");
+        
+        let tool_mode = *self.tool_mode.read().await;
+        
+        // In compact mode, return only the 4 meta-tools
+        if matches!(tool_mode, ToolMode::Compact) {
+            return self.handle_tools_list_compact(request).await;
+        }
 
+        // Full mode: return all tools from chat handle
         let response = self.chat_handle.list_tools().await;
         if response.success {
             let tools_value = response.result.unwrap_or_else(|| json!({}));
@@ -177,6 +285,114 @@ impl McpServer {
                 result: None,
                 error: Some(McpError::new(-32603, msg)),
             }
+        }
+    }
+    
+    /// Return compact mode meta-tools (4 tools instead of 750+)
+    async fn handle_tools_list_compact(&self, request: McpRequest) -> McpResponse {
+        debug!("Returning COMPACT mode tools (4 meta-tools)");
+        
+        let compact_tools = vec![
+            json!({
+                "name": "list_tools",
+                "description": "List available tools. Filter by 'category' or 'namespace'. Returns names and descriptions. Use 'get_tool_schema' before executing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": "Filter by category (e.g., 'systemd', 'network', 'filesystem', 'dbus')"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Filter by namespace (e.g., 'system', 'external')"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max tools to return (default: 20)"
+                        }
+                    }
+                },
+                "annotations": {
+                    "category": "meta",
+                    "namespace": "compact"
+                }
+            }),
+            json!({
+                "name": "search_tools",
+                "description": "Search for tools by keyword in names and descriptions. Use this to find relevant tools.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (searches tool names and descriptions)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default: 10)"
+                        }
+                    },
+                    "required": ["query"]
+                },
+                "annotations": {
+                    "category": "meta",
+                    "namespace": "compact"
+                }
+            }),
+            json!({
+                "name": "get_tool_schema",
+                "description": "Get the full input schema for a specific tool. ALWAYS call this before execute_tool to see required arguments.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Name of the tool to get schema for"
+                        }
+                    },
+                    "required": ["tool_name"]
+                },
+                "annotations": {
+                    "category": "meta",
+                    "namespace": "compact"
+                }
+            }),
+            json!({
+                "name": "execute_tool",
+                "description": "Execute any tool by name. First use list_tools/search_tools to find tools, then get_tool_schema to see required arguments.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Name of the tool to execute"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments to pass to the tool (see get_tool_schema for required args)"
+                        }
+                    },
+                    "required": ["tool_name"]
+                },
+                "annotations": {
+                    "category": "meta",
+                    "namespace": "compact"
+                }
+            }),
+        ];
+        
+        info!("📦 Compact mode: returning {} meta-tools (saves ~95% context tokens)", compact_tools.len());
+        
+        McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(json!({
+                "tools": compact_tools,
+                "_compact_mode": true,
+                "_hint": "Use list_tools to browse, search_tools to find, get_tool_schema for args, execute_tool to run"
+            })),
+            error: None,
         }
     }
 

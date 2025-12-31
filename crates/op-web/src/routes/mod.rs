@@ -12,6 +12,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 use crate::mcp;
+use crate::mcp_picker;
+use crate::groups_admin;
 use crate::sse;
 use crate::state::AppState;
 use crate::websocket;
@@ -82,7 +84,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .nest("/api", api_routes)
         .merge(mcp_route)
-        .merge(ws_route);
+        .merge(ws_route)
+        .nest("/mcp-picker", mcp_picker::create_picker_router(state.clone()))
+        .nest("/groups-admin", groups_admin::create_groups_admin_router(state.clone()));
 
     // Serve static files (WASM frontend) from an explicit path if configured.
     if let Ok(dir) = std::env::var("OP_WEB_STATIC_DIR") {

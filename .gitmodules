@@ -4,3 +4,6 @@
 [submodule "chat-ui"]
 	path = chat-ui
 	url = https://github.com/huggingface/chat-ui.git
+[submodule "gemini-op-dbus"]
+	path = gemini-op-dbus
+	url = /home/jeremy/git/op-dbus-v2/gemini-op-dbus/
