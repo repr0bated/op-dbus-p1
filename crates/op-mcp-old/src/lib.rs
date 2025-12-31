@@ -63,6 +63,7 @@ pub mod resources;
 
 // Comprehensive introspection
 pub mod comprehensive_introspection;
+pub mod consolidated_introspection;
 pub mod native_introspection;
 
 // Inspector Gadget
