@@ -176,6 +176,47 @@ git add -A && git commit -m "message" && git push origin master
 
 ---
 
+## Quick Task for Claude Code (Sonnet is fine)
+
+```bash
+# 1. Clone op-dbus-v2 source
+git clone https://github.com/repr0bated/op-dbus-v2.git /tmp/v2-source
+
+# 2. Copy unique files from v2 to current repo
+cd /home/jeremy/git/op-dbus-v2
+
+# MCP files
+cp /tmp/v2-source/crates/op-mcp/src/lazy_tools.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/server.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/router.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/config.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/tool_adapter.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/tool_adapter_orchestrated.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/external_client.rs crates/op-mcp/src/
+cp /tmp/v2-source/crates/op-mcp/src/http_server.rs crates/op-mcp/src/
+cp -r /tmp/v2-source/crates/op-mcp/docs crates/op-mcp/
+cp /tmp/v2-source/crates/op-mcp/SETUP.md crates/op-mcp/
+
+# MCP-old introspection files
+cp /tmp/v2-source/crates/op-mcp-old/src/hybrid_scanner.rs crates/op-mcp-old/src/
+cp /tmp/v2-source/crates/op-mcp-old/src/introspection_cache.rs crates/op-mcp-old/src/
+cp /tmp/v2-source/crates/op-mcp-old/src/introspection_parser.rs crates/op-mcp-old/src/
+cp /tmp/v2-source/crates/op-mcp-old/src/comprehensive_introspection.rs crates/op-mcp-old/src/
+cp /tmp/v2-source/crates/op-mcp-old/src/consolidated_introspection.rs crates/op-mcp-old/src/
+
+# 3. Check if it compiles (may need to update mod.rs files)
+cargo check --workspace
+
+# 4. Commit and push
+git add -A
+git commit -m "feat: merge unique files from op-dbus-v2 repo"
+git push origin master
+```
+
+**Note:** After copying, you may need to add `mod` declarations in `lib.rs` files. Check for compilation errors.
+
+---
+
 ## Questions to Answer
 
 1. Should we consolidate repos into one? Which name to keep?
