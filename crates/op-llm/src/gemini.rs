@@ -371,6 +371,7 @@ fn get_gemini_models() -> Vec<GeminiModel> {
 
         // Text-out models (main chat)
         // Note: Preview models require global location in Vertex AI
+        GeminiModel::new("gemini-3-pro", TextOut, 60, 1_000_000, 500),
         GeminiModel::new("gemini-3-pro-preview", TextOut, 60, 1_000_000, 500),
         GeminiModel::new("gemini-2.5-pro-preview-06-05", TextOut, 150, 2_000_000, 10_000),
         GeminiModel::new("gemini-2.5-flash-preview-05-20", TextOut, 1_000, 1_000_000, 10_000),

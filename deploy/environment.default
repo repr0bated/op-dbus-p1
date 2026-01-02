@@ -28,7 +28,7 @@ OP_SELF_REPO_PATH=/home/jeremy/git/op-dbus-v2
 GOOGLE_CLOUD_PROJECT=geminidev-479406
 GOOGLE_CLOUD_LOCATION=global
 GOOGLE_GENAI_USE_VERTEXAI=true
-GOOGLE_GENAI_MODEL=gemini-2.0-flash-exp
+GOOGLE_GENAI_MODEL=gemini-3-pro
 # GEMINI_API_KEY=
 
 # Anthropic Claude
