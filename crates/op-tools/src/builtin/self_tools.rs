@@ -434,47 +434,90 @@ impl Tool for SelfSearchCodeTool {
         
         // Try ripgrep first
         let search_path_str = search_path.to_string_lossy().to_string();
-        let mut rg_args = vec!["--line-number", "--no-heading"];
+        
+        // Limit max output per file to avoid huge buffers
+        let mut rg_args = vec!["--line-number", "--no-heading", "--max-count", "100"];
         if !case_sensitive {
             rg_args.push("-i");
         }
         rg_args.push(pattern);
         rg_args.push(&search_path_str);
         
-        let result = Command::new("rg")
-            .args(&rg_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        // Add timeout to prevent blocking the async runtime for too long
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            Command::new("rg")
+                .args(&rg_args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        ).await;
         
-        let (stdout, _stderr, _exit_code) = match result {
-            Ok(output) => (
+        let (stdout, stderr, exit_code) = match result {
+            Ok(Ok(output)) => (
                 String::from_utf8_lossy(&output.stdout).to_string(),
                 String::from_utf8_lossy(&output.stderr).to_string(),
                 output.status.code().unwrap_or(-1),
             ),
-            Err(_) => {
-                // Fall back to grep
-                let grep_args = if case_sensitive {
-                    vec!["-rn", pattern, &search_path_str]
+            Ok(Err(e)) => {
+                // ripgrep failed to start, try grep
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // Fall back to grep
+                    let mut grep_args = vec!["-rn"];
+                    if !case_sensitive {
+                        grep_args.push("-i");
+                    }
+                    // Limit max count if possible
+                    grep_args.push("-m");
+                    grep_args.push("100");
+                    
+                    // Exclude heavy directories
+                    grep_args.push("--exclude-dir=target");
+                    grep_args.push("--exclude-dir=.git");
+                    grep_args.push("--exclude-dir=node_modules");
+                    
+                    grep_args.push(pattern);
+                    grep_args.push(&search_path_str);
+                    
+                    let grep_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        Command::new("grep")
+                            .args(&grep_args)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .output()
+                    ).await;
+                    
+                     match grep_result {
+                        Ok(Ok(output)) => (
+                            String::from_utf8_lossy(&output.stdout).to_string(),
+                            String::from_utf8_lossy(&output.stderr).to_string(),
+                            output.status.code().unwrap_or(-1),
+                        ),
+                        Ok(Err(e)) => (
+                            String::new(),
+                            format!("Failed to execute grep: {}", e),
+                            -1
+                        ),
+                        Err(_) => (
+                            String::new(),
+                            "Search timed out after 30 seconds".to_string(),
+                            -1
+                        )
+                    }
                 } else {
-                    vec!["-rni", pattern, &search_path_str]
-                };
-                
-                let output = Command::new("grep")
-                    .args(&grep_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await?;
-                
-                (
-                    String::from_utf8_lossy(&output.stdout).to_string(),
-                    String::from_utf8_lossy(&output.stderr).to_string(),
-                    output.status.code().unwrap_or(-1),
-                )
-            }
+                    (
+                        String::new(),
+                        format!("Failed to execute rg: {}", e),
+                        -1
+                    )
+                }
+            },
+            Err(_) => (
+                String::new(),
+                "Search timed out after 30 seconds".to_string(),
+                -1
+            )
         };
         
         let lines: Vec<&str> = stdout.lines().take(max_results).collect();
