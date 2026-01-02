@@ -6,10 +6,12 @@
 debug.log
 *.log
 *.debug
+server_log.txt
 
 # IDE files
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -17,6 +19,7 @@ debug.log
 # OS files
 .DS_Store
 Thumbs.db
+.bashrc
 
 # Temporary files
 *.tmp
@@ -43,9 +46,64 @@ docs/_build/
 .env
 .env.local
 .env.*.local
+.env.example
 
 # Test artifacts
 test-results/
 *.tshirt
-#old repo
-#op-dbus-v2-old/
+
+# Development and tool-specific directories
+.agent/
+.aye/
+.gemini/
+.antigravity-mcp-*.json
+
+# Screenshots and media files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+Screenshot_*.png
+
+# Large staging/old repositories (don't upload to GitHub)
+op-dbus-staging/
+op-dbus-v2-old/
+
+# Chat UI build artifacts (if using a build system)
+chat-ui/dist/
+chat-ui/node_modules/
+chat-ui/.svelte-kit/
+
+# Database and cache files
+*.sqlite3
+*.db
+.cache/
+chroma_db/
+
+# Binary executables
+netclient
+
+# Documentation analysis files (generated/review artifacts)
+*-review-*.md
+*-analysis-*.md
+*.txt
+CONTEXT-*.md
+DOCUMENTATION-*.md
+COMPREHENSIVE-*.md
+VERIFICATION_REPORT.md
+code_review_*.md
+implementation_guidance*.md
+LLM-SYSTEM-PROMPT-*.txt
+missing_functionality_checklist.md
+Systematic*.md
+GEMINI.md
+disaster.md
+
+# Scripts and tools (development-specific)
+repository_comparison_script.sh
+check_ovs.sh
+
+# Cursor-specific files
+cursor_tool_listing.md
+.cursorrules
