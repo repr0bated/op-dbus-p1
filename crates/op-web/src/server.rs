@@ -57,7 +57,7 @@ impl Default for RateLimitConfig {
 impl Default for WebServerConfig {
     fn default() -> Self {
         Self {
-            addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
             static_dir: None,
             cors_enabled: true,
             rate_limit: Default::default(),

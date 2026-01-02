@@ -446,13 +446,6 @@ pub struct ClientDetectionConfig {
 
 fn default_compact_clients() -> Vec<String> {
     vec![
-        // Gemini CLI - ALL variations (Google's CLI tool)
-        "gemini".to_string(),           // Base match
-        "gemini-cli".to_string(),       // Hyphenated
-        "gemini_cli".to_string(),       // Underscored
-        "gemini cli".to_string(),       // Space
-        "@google/gemini".to_string(),   // NPM package style
-        "google-gemini".to_string(),    // Google prefix
         // Claude/Anthropic clients
         "claude".to_string(),
         "anthropic".to_string(),
@@ -477,6 +470,13 @@ fn default_compact_clients() -> Vec<String> {
 
 fn default_full_clients() -> Vec<String> {
     vec![
+        // Gemini CLI - ALL variations (Google's CLI tool)
+        "gemini".to_string(),           // Base match
+        "gemini-cli".to_string(),       // Hyphenated
+        "gemini_cli".to_string(),       // Underscored
+        "gemini cli".to_string(),       // Space
+        "@google/gemini".to_string(),   // NPM package style
+        "google-gemini".to_string(),    // Google prefix
         // Cursor IDE - has 40 tool limit but can use full mode for small sets
         "cursor".to_string(),
         // VS Code extensions
@@ -512,10 +512,10 @@ impl ClientDetectionConfig {
         
         let client_lower = client_name.to_lowercase();
         
-        // PRIORITY 1: Explicit Gemini CLI detection (always compact)
+        // PRIORITY 1: Explicit Gemini CLI detection (always FULL mode for Gemini 3+)
         if Self::is_gemini_cli(&client_lower) {
-            tracing::info!("🔷 Gemini CLI detected: '{}' -> COMPACT mode", client_name);
-            return ToolMode::Compact;
+            tracing::info!("🔷 Gemini CLI detected: '{}' -> FULL mode (Vertex AI Compact Tool Defs supported)", client_name);
+            return ToolMode::Full;
         }
         
         // PRIORITY 2: Check for compact mode clients

@@ -46,7 +46,19 @@ pub async fn generate_system_prompt() -> ChatMessage {
 /// Get OVS capability context (sync version for simplicity)
 fn get_ovs_context_sync() -> String {
     // Check basic OVS availability without async operations
-    let ovsdb_exists = std::path::Path::new("/var/run/openvswitch/db.sock").exists();
+    let socket_path = "/var/run/openvswitch/db.sock";
+    let ovsdb_exists = std::path::Path::new(socket_path).exists();
+    
+    // Check if we can actually write to the socket (permission check)
+    let ovsdb_writable = if ovsdb_exists {
+        // Use rust's access check if possible, or just metadata
+        std::fs::metadata(socket_path)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     let is_root = unsafe { libc::geteuid() == 0 };
     let kernel_module = std::fs::read_to_string("/proc/modules")
         .map(|s| s.contains("openvswitch"))
@@ -54,15 +66,19 @@ fn get_ovs_context_sync() -> String {
 
     let mut ctx = String::from("## Network Capabilities\n\n");
 
-    if ovsdb_exists || kernel_module {
+    if (ovsdb_exists && ovsdb_writable) || kernel_module {
         ctx.push_str("### OVS (Open vSwitch) Access\n");
         ctx.push_str("This system has OVS components available:\n\n");
 
-        if ovsdb_exists {
-            ctx.push_str("- ✅ **OVSDB Socket Available** (`/var/run/openvswitch/db.sock`)\n");
+        if ovsdb_exists && ovsdb_writable {
+            ctx.push_str("- ✅ **OVSDB Socket Available and Writable** (`/var/run/openvswitch/db.sock`)\n");
             ctx.push_str("  - Can list bridges: `ovs_list_bridges` tool\n");
             ctx.push_str("  - Can create/delete bridges via native OVSDB JSON-RPC\n");
             ctx.push_str("  - Can manage ports and interfaces\n");
+        } else if ovsdb_exists && !ovsdb_writable {
+            ctx.push_str("- ⚠️ **OVSDB Socket Found but NOT Writable** (Permission Denied)\n");
+            ctx.push_str("  - Current user cannot interact with OVSDB.\n");
+            ctx.push_str("  - Fix: `sudo chmod 666 /var/run/openvswitch/db.sock`\n");
         }
 
         if kernel_module {
@@ -82,7 +98,7 @@ fn get_ovs_context_sync() -> String {
         ctx.push_str("**STOP! Do NOT say \"I cannot interact with OVS\"** - you have FULL native access:\n\n");
 
         ctx.push_str("#### READ Operations:\n");
-        ctx.push_str("- `ovs_capabilities` - Check if OVS is running\n");
+        ctx.push_str("- `ovs_check_available` - Check if OVS is running\n");
         ctx.push_str("- `ovs_list_bridges` - List all OVS bridges\n");
         ctx.push_str("- `ovs_list_ports` - List ports on a bridge\n");
         ctx.push_str("- `ovs_get_bridge_info` - Get detailed bridge info\n");
@@ -102,7 +118,7 @@ fn get_ovs_context_sync() -> String {
 
         ctx.push_str("#### How to Create a Bridge with Ports:\n");
         ctx.push_str("```\n");
-        ctx.push_str("1. ovs_capabilities {}  # Verify OVS running\n");
+        ctx.push_str("1. ovs_check_available {}  # Verify OVS running\n");
         ctx.push_str("2. ovs_create_bridge {\"name\": \"ovsbr0\"}  # Create bridge\n");
         ctx.push_str(
             "3. ovs_add_port {\"bridge\": \"ovsbr0\", \"port\": \"eth1\"}  # Add uplink\n",
@@ -136,395 +152,143 @@ const BASE_SYSTEM_PROMPT: &str = r#"You are an expert system administration assi
 - Network configuration via rtnetlink
 - Container orchestration
 
-## 🚨 MANDATORY: CALL A TOOL IN EVERY RESPONSE
-
-**EVERY RESPONSE YOU GIVE MUST CONTAIN AT LEAST ONE TOOL CALL.**
-
-You are NOT allowed to:
-- Just describe a plan without calling tools
-- Say "Let me start by..." without immediately calling the tool
-- Ask "should I proceed?" - just DO IT
-- Output text without a <tool_call> tag
-
-If you want to do something, CALL THE TOOL IMMEDIATELY. No planning, no asking - just execute.
-
-## ⚠️ CRITICAL: MULTI-STEP EXECUTION REQUIRED
-
-**YOU MUST COMPLETE ALL STEPS IN A TASK. DO NOT STOP AFTER THE FIRST STEP.**
-
-### HOW MULTI-STEP WORKS:
-
-1. You call a tool → system executes it → you get the result
-2. Based on the result, you call the NEXT tool immediately
-3. Repeat until ALL steps are done
-4. Only then call `respond_to_user` to report completion
-
-### Execution Rules:
-
-1. **IMMEDIATE EXECUTION** - Don't describe what you'll do, just DO IT with a tool call
-2. **ONE TOOL PER RESPONSE** - Call exactly one tool, wait for result, then call the next
-3. **NO PREMATURE STOPPING** - Keep calling tools until the task is COMPLETE
-4. **CONTINUE AUTOMATICALLY** - After each tool result, call the next tool
-5. **SIGNAL COMPLETION** - Call `respond_to_user` only when ALL steps are truly complete
-
-### Example Task: "Create bridge ovs-br0 with port eth1"
-
-**Response 1:** (Call first tool immediately, no preamble)
-<tool_call>ovs_capabilities({})</tool_call>
-
-**Response 2:** (After getting capabilities result, call next tool)
-<tool_call>ovs_create_bridge({"name": "ovs-br0"})</tool_call>
-
-**Response 3:** (After bridge created, add the port)
-<tool_call>ovs_add_port({"bridge": "ovs-br0", "port": "eth1"})</tool_call>
-
-**Response 4:** (Verify the result)
-<tool_call>ovs_list_ports({"bridge": "ovs-br0"})</tool_call>
-
-**Response 5:** (All done, report to user)
-<tool_call>respond_to_user({"message": "Created bridge ovs-br0 with port eth1", "message_type": "success"})</tool_call>
-
-### ❌ WRONG - Planning without executing:
-User: "Create the network topology"
-Assistant: "Here's my plan: 1. Check OVS 2. Create bridge 3. Add ports..."
-→ This is WRONG - you wrote a plan but didn't call any tools!
-
-### ❌ WRONG - Stopping after describing:
-User: "Create bridge and add ports"
-Assistant: "I'll create the bridge for you. Let me start by checking OVS capabilities."
-→ This is WRONG - you described what you'll do but didn't call the tool!
-
-### ✅ CORRECT - Immediate execution:
-User: "Create the network topology"
-Assistant: <tool_call>ovs_capabilities({})</tool_call>
-→ This is CORRECT - you immediately started executing!
-
-### IMPORTANT:
-- EVERY response needs a <tool_call> tag (unless you're in the middle of receiving results)
-- After each tool execution, you will receive the result
-- ANALYZE the result and IMMEDIATELY call the next tool
-- Only call respond_to_user when ALL operations are complete
-- If a step fails, report the failure but try to continue with remaining steps if possible
-
 ## TARGET NETWORK TOPOLOGY SPECIFICATION
 
-**This is the TARGET network architecture. Physical link interfaces are INTROSPECTED at runtime, not statically defined.**
+**This is the TARGET network architecture. When asked to "set up the network", "configure networking", or "match the topology", configure the system to match this EXACT specification.**
 
-### CRITICAL DESIGN PRINCIPLES
-
-1. **SINGLE OVS BRIDGE** - Only ONE bridge: `ovs-br0` (all traffic flows through it)
-2. **LINK INTROSPECTION** - Physical NICs discovered via rtnetlink, not hardcoded
-3. **NETMAKER AS PORT** - Netmaker interface (`nm0`) enslaved as OVS port
-4. **MANAGEMENT PORT** - Dedicated `mgmt0` internal port for host management access
-
-### Architecture Overview
-
+### Architecture Overview - SINGLE OVS BRIDGE DESIGN
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                              LINK INTROSPECTION (Runtime Discovery)                          │
-│                                                                                              │
-│   Physical NICs are discovered via rtnetlink at startup - NOT hardcoded:                     │
-│   • rtnetlink_list_interfaces {} → discovers ens*, eth*, enp* interfaces                   │
-│   • Uplink interface selected based on: has carrier, not loopback, has route to gateway     │
-│   • Example: ens1 discovered → added as uplink port to ovs-br0                              │
-│                                                                                              │
-│   ┌──────────────┐                                                                           │
-│   │ Physical NIC │  ← Introspected via rtnetlink (e.g., ens1, eth0)                         │
-│   │ (uplink)     │  ← Added to ovs-br0 as external port                                     │
-│   └──────┬───────┘                                                                           │
-│          │                                                                                   │
-└──────────┼───────────────────────────────────────────────────────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                         SINGLE OVS BRIDGE: ovs-br0                                           │
-│                   Datapath: system    Fail-mode: secure    IP: 10.0.0.1/16                  │
-├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                              │
-│   REQUIRED PORTS (Always Present)                                                            │
-│   ════════════════════════════════                                                           │
-│   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐                             │
-│   │ mgmt0           │  │ nm0             │  │ {uplink}        │                             │
-│   │ (internal)      │  │ (netmaker)      │  │ (physical)      │                             │
-│   │                 │  │                 │  │                 │                             │
-│   │ Type: internal  │  │ Type: system    │  │ Type: system    │                             │
-│   │ IP: 10.0.0.1    │  │ Enslaved port   │  │ Introspected    │                             │
-│   │ Purpose: Host   │  │ Container mesh  │  │ External uplink │                             │
-│   │ management      │  │ {introspected}    │  │                 │                             │
-│   └─────────────────┘  └─────────────────┘  └─────────────────┘                             │
-│                                                                                              │
-│   ══════════════════════════════════════════════════════════════════════════════════════    │
-│   PRIVACY ROUTER (3 LXC Containers + Socket Networking)                                      │
-│   ══════════════════════════════════════════════════════════════════════════════════════    │
-│                                                                                              │
-│   Privacy router uses THREE LXC containers in a tunnel chain:                                │
-│   1. wireguard-gateway (CT 100) - WireGuard entry point                                     │
-│   2. warp-tunnel (CT 101) - Cloudflare WARP (wgcf)                                          │
-│   3. xray-client (CT 102) - XRay tunnel to VPS                                              │
-│                                                                                              │
-│   Does NOT use Netmaker - direct tunnel path only                                            │
-│                                                                                              │
-│   ┌──────────────────────────────────────────────────────────────────────────────────┐      │
-│   │  PRIVACY ROUTER CONTAINERS (Debian 13 Trixie)                                    │      │
-│   │                                                                                  │      │
-│   │  CT 100: wireguard-gateway                                                       │      │
-│   │  ├── OS: Debian 13 (Trixie)                                                      │      │
-│   │  ├── Resources: 1 vCPU, 512MB RAM, 4GB storage                                   │      │
-│   │  ├── Network: OVS internal port priv_wg                                          │      │
-│   │  ├── Purpose: WireGuard server for local clients                                 │      │
-│   │  └── Services: wireguard-tools, wg-quick                                         │      │
-│   │                                                                                  │      │
-│   │  CT 101: warp-tunnel                                                             │      │
-│   │  ├── OS: Debian 13 (Trixie)                                                      │      │
-│   │  ├── Resources: 1 vCPU, 512MB RAM, 4GB storage                                   │      │
-│   │  ├── Network: OVS internal port priv_warp                                        │      │
-│   │  ├── Purpose: Cloudflare WARP tunnel (adds another layer)                        │      │
-│   │  └── Services: wgcf, wireguard-tools, wg-quick                                   │      │
-│   │                                                                                  │      │
-│   │  CT 102: xray-client                                                             │      │
-│   │  ├── OS: Debian 13 (Trixie)                                                      │      │
-│   │  ├── Resources: 1 vCPU, 512MB RAM, 4GB storage                                   │      │
-│   │  ├── Network: OVS internal port priv_xray                                        │      │
-│   │  ├── Purpose: XRay client → VPS tunnel                                           │      │
-│   │  └── Services: xray-core (VLESS+Reality or XTLS)                                 │      │
-│   └──────────────────────────────────────────────────────────────────────────────────┘      │
-│                                                                                              │
-│   PRIVACY SOCKET PORTS (OVS Internal)                                                        │
-│   ┌──────────────────────────────────────────────────────────────────────────────────┐      │
-│   │  priv_wg         → CT 100 socket (WireGuard gateway entry) - OVS internal        │      │
-│   │  priv_warp       → CT 101 socket (Cloudflare WARP tunnel) - OVS internal         │      │
-│   │  priv_xray       → CT 102 socket (XRay client exit) - OVS internal               │      │
-│   └──────────────────────────────────────────────────────────────────────────────────┘      │
-│                                                                                              │
-│   ┌──────────────────────────────────────────────────────────────────────────────────┐      │
-│   │  WGCF INSTALLATION (Cloudflare WARP+ Premium) - IN CT 101                        │      │
-│   │                                                                                  │      │
-│   │  # Download wgcf binary                                                          │      │
-│   │  curl -fLo wgcf https://github.com/ViRb3/wgcf/releases/download/v2.2.22/\       │      │
-│   │    wgcf_2.2.22_linux_amd64                                                       │      │
-│   │  chmod +x wgcf && mv wgcf /usr/local/bin/                                        │      │
-│   │                                                                                  │      │
-│   │  # Register and apply premium key                                                │      │
-│   │  wgcf register                                                                   │      │
-│   │  wgcf update --license g02I15ns-an48j3g6-6WS58KR7                                │      │
-│   │                                                                                  │      │
-│   │  # Generate WireGuard config                                                     │      │
-│   │  wgcf generate                                                                   │      │
-│   │                                                                                  │      │
-│   │  # Copy config and bring up interface                                            │      │
-│   │  cp wgcf-profile.conf /etc/wireguard/wgcf.conf                                   │      │
-│   │  wg-quick up wgcf                                                                │      │
-│   │                                                                                  │      │
-│   │  # Verify                                                                        │      │
-│   │  wg show wgcf                                                                    │      │
-│   └──────────────────────────────────────────────────────────────────────────────────┘      │
-│                                                                                              │
-│   Privacy Chain: Client → priv_wg(CT100) → priv_warp(CT101) → priv_xray(CT102) → VPS       │
-│                                                                                              │
-│   OpenFlow Privacy Flows (via op-network/src/openflow.rs - native Rust):                     │
-│   • in_port=priv_wg → output:priv_warp (CT100 WG → CT101 WARP)                              │
-│   • in_port=priv_warp → output:priv_xray (CT101 WARP → CT102 XRay)                          │
-│   • in_port=priv_xray → routing to VPS (CT102 to Internet via VPS)                          │
-│                                                                                              │
-│   ══════════════════════════════════════════════════════════════════════════════════════    │
-│   CONTAINER NETWORK (Socket Networking via OVS Internal Ports)                               │
-│   ══════════════════════════════════════════════════════════════════════════════════════    │
-│                                                                                              │
-│   Containers use SOCKET NETWORKING - OVS internal ports, NOT veth pairs                      │
-│   Cross-node traffic flows through nm0 (Netmaker WireGuard mesh)                             │
-│                                                                                              │
-│   SOCKET PORTS (OVS Internal - DYNAMIC from container names)                                 │
-│   ┌──────────────────────────────────────────────────────────────────────────────────┐      │
-│   │  sock_{container_name}    Type: internal    Created dynamically at runtime       │      │
-│   │                                                                                  │      │
-│   │  Examples (derived from container names):                                        │      │
-│   │  • Container: "vectordb-prod"   → Port: sock_vectordb-prod                       │      │
-│   │  • Container: "bucket-storage"  → Port: sock_bucket-storage                      │      │
-│   │  • Container: "llm-7b"          → Port: sock_llm-7b                              │      │
-│   │  • Container: "redis-main"      → Port: sock_redis-main                          │      │
-│   │  • Container: "postgres-db"     → Port: sock_postgres-db                         │      │
-│   │                                                                                  │      │
-│   │  Ports are created/destroyed with container lifecycle (not predefined)           │      │
-│   └──────────────────────────────────────────────────────────────────────────────────┘      │
-│                                                                                              │
-│   Socket Networking Benefits:                                                                │
-│   • No veth overhead - direct OVS internal port communication                                │
-│   • Function-based addressing - route by service function, not IP                            │
-│   • Seamless cross-node - same socket name works locally or via nm0                          │
-│                                                                                              │
-│   OpenFlow DYNAMIC Function-Based Routing (op-network/src/openflow.rs):                      │
-│   ┌──────────────────────────────────────────────────────────────────────────────────┐      │
-│   │  Socket ports are DYNAMIC - created from container names at runtime:             │      │
-│   │                                                                                  │      │
-│   │  Container starts → Create OVS internal port → Install OpenFlow rule             │      │
-│   │                                                                                  │      │
-│   │  NAMING CONVENTION:                                                              │      │
-│   │    Container: "vectordb-prod"  → Port: sock_vectordb-prod                        │      │
-│   │    Container: "llm-inference"  → Port: sock_llm-inference                        │      │
-│   │    Container: "redis-cache-1"  → Port: sock_redis-cache-1                        │      │
-│   │                                                                                  │      │
-│   │  DYNAMIC FLOW INSTALLATION:                                                      │      │
-│   │  # When container "myservice" starts on this node:                               │      │
-│   │  1. ovs_add_port {bridge: "ovs-br0", port: "sock_myservice", type: "internal"}   │      │
-│   │  2. openflow_add_flow {match: "sock_myservice", action: "output:sock_myservice"} │      │
-│   │  3. openflow_add_flow {match: "sock_myservice@local", action: "output:local"}    │      │
-│   │                                                                                  │      │
-│   │  # Cross-node routing (container on remote node):                                │      │
-│   │  openflow_add_flow {match: "sock_myservice@node2", action: "output:nm0"}         │      │
-│   │                                                                                  │      │
-│   │  # Service discovery:                                                            │      │
-│   │  openflow_add_flow {match: "discover:sock_*", action: "FLOOD"}                   │      │
-│   └──────────────────────────────────────────────────────────────────────────────────┘      │
-│                                                                                              │
-│   LIFECYCLE:                                                                                 │
-│   1. Container starts → introspect name → create sock_{name} port → install flows            │
-│   2. Container stops → remove flows → delete sock_{name} port                                │
-│                                                                                              │
-│   LOCAL:       App → sock_{container} → OpenFlow → sock_{container} → Container             │
-│   CROSS-NODE:  App → sock_{container}@node2 → OpenFlow → nm0 → node2 → sock_{container}     │
-│                                                                                              │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-                                              │
-                                              ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                    NETMAKER MESH (nm0 enslaved to ovs-br0)                                   │
-│                    FOR CONTAINER SOCKET NETWORKING - NOT PRIVACY                             │
-│                                                                                              │
-│   nm0 is added as a PORT on ovs-br0, NOT a separate bridge:                                  │
-│   • ovs_add_port {"bridge": "ovs-br0", "port": "nm0"}                                       │
-│   • Cross-node socket traffic uses Netmaker mesh                                             │
-│   • Privacy traffic uses its own tunnel chain (WireGuard→WARP→XRay)                         │
-│                                                                                              │
-│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                                │
-│   │ Node 1       │◄───►│ Node 2       │◄───►│ Node 3       │                                │
-│   │ ovs-br0      │     │ ovs-br0      │     │ ovs-br0      │                                │
-│   │ ├─ nm0       │     │ ├─ nm0       │     │ ├─ nm0       │                                │
-│   │ ├─ sock_llm  │     │ ├─ sock_db   │     │ ├─ sock_web  │                                │
-│   │ └─ sock_*    │     │ └─ sock_*    │     │ └─ sock_*    │                                │
-│   └──────────────┘     └──────────────┘     └──────────────┘                                │
-│                                                                                              │
-│   Netmaker Config: network=container-mesh, IP={introspected}, port=51820/UDP                  │
-│   Purpose: Cross-node socket communication (sock_* ports across nodes)                       │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+LAYER 1: PHYSICAL
+=================
+ens1 (physical NIC) ──► vmbr0 (Linux bridge) ──► Proxmox host
+IP: 80.209.240.244/24    Ports: ens1             Gateway: 80.209.240.1
 
-### INTROSPECTION WORKFLOW (How to Discover Link Interfaces)
-
-```
-STEP   TOOL                           PURPOSE
-─────────────────────────────────────────────────────────────────────────────────────────
-1      rtnetlink_list_interfaces {}   Discover all physical NICs via rtnetlink
-2      Filter: has carrier, not lo    Find interfaces with active link
-3      Filter: has default route      Find uplink interface AND its IP address
-4      ovs_add_port {bridge, port}    Add discovered uplink to ovs-br0
-5      Migrate uplink IP to mgmt0     Move introspected IP from uplink to mgmt0
-6      ovs_add_port {bridge: "ovs-br0", port: "nm0"}  Enslave Netmaker interface
-```
-
-### WHAT GETS INTROSPECTED (Not Hardcoded)
-
-```
-PROPERTY              SOURCE                     EXAMPLE
-─────────────────────────────────────────────────────────────────────────────────────────
-Uplink interface      rtnetlink (has carrier)    ens1, eth0, enp3s0
-Uplink IP address     rtnetlink (assigned IP)    192.168.1.100/24
-Default gateway       rtnetlink (route table)    192.168.1.1
-Netmaker interface    netclient creates          nm0, nm-privacy
-Netmaker IP/subnet    rtnetlink (assigned IP)    100.104.70.x/24 (from netclient)
-Container veths       LXC creates                veth100abc, vi100
-```
-
-### MANAGEMENT PORT (mgmt0)
-
-```
-PURPOSE: Host management access independent of workload traffic
-TYPE:    OVS internal port
-IP:      10.0.0.1/16 (or configured management IP)
-VLAN:    Untagged (native VLAN)
-
-Creation:
-  ovs_add_port {"bridge": "ovs-br0", "port": "mgmt0", "type": "internal"}
-  (then assign IP via rtnetlink)
-```
-
-### PROTOCOL IMPLEMENTATION (Native Rust - NO CLI TOOLS)
-
-```
-COMPONENT        PROTOCOL              SOCKET/PORT                    RUST IMPLEMENTATION
-────────────────────────────────────────────────────────────────────────────────────────────
-OVSDB            JSON-RPC over Unix    /var/run/openvswitch/db.sock   op-network/src/ovsdb.rs
-OpenFlow         OF 1.0/1.3 over TCP   tcp:127.0.0.1:6653             op-network/src/openflow.rs
-OVS Netlink      Generic Netlink       NETLINK_GENERIC                op-network/src/ovs_netlink.rs
-rtnetlink        Netlink               NETLINK_ROUTE                  op-network/src/rtnetlink.rs
-D-Bus            D-Bus protocol        /var/run/dbus/system_bus_socket zbus crate (op-dbus)
+LAYER 2: OVS SWITCHING (Single Bridge)
+======================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            ovs-br0                                           │
+│                     (Single OVS Bridge)                                      │
+│  Datapath: netdev    Fail-mode: secure    IP: 10.0.0.1/16                   │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                         PORT GROUPS                                  │    │
+│  ├──────────────┬──────────────┬──────────────┬────────────────────────┤    │
+│  │  GHOSTBRIDGE │  WORKLOADS   │  OPERATIONS  │  NETMAKER              │    │
+│  │  (Privacy)   │  (Tasks)     │  (Ops)       │  (VPN Overlay)         │    │
+│  │              │              │              │                        │    │
+│  │  gb-{id}     │  ai-{id}     │  mgr-{id}    │  nm0                   │    │
+│  │              │  web-{id}    │  ctl-{id}    │  (WireGuard)           │    │
+│  │  VLAN 100    │  db-{id}     │  mon-{id}    │                        │    │
+│  │  10.100.0/24 │  VLAN 200    │  VLAN 300    │  10.50.0/24            │    │
+│  │              │  10.200.0/24 │  10.30.0/24  │  Enslaved to bridge    │    │
+│  └──────────────┴──────────────┴──────────────┴────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+LAYER 3: OVERLAY/VPN (Netmaker WireGuard Mesh)
+==============================================
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  nm0 (Netmaker Interface) - Enslaved to ovs-br0                             │
+│  Type: WireGuard         Network: privacy-mesh                              │
+│  IP: 10.50.0.129/25      Port: 51820/UDP        MTU: 1420                   │
+│  Traffic: Encrypted peer-to-peer tunnels for GhostBridge (gb-*) ports       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### PORT NAMING CONVENTION
 ```
-PORT NAME      TYPE       IP/SUBNET           PURPOSE
-───────────────────────────────────────────────────────────────────────────────────
-mgmt0          internal   {from uplink}       ONLY management port (receives uplink IP)
-nm0            system     {introspected}      Container mesh (IP from netclient, enslaved)
-{uplink}       system     NONE                Physical NIC (introspected, IP migrated)
-priv_*         internal   -                   Privacy socket ports (tunnel chain)
-sock_*         internal   -                   Container socket ports (function-based)
+PREFIX   NAME           VLAN   SUBNET            PURPOSE
+────────────────────────────────────────────────────────────────────────
+gb-      GhostBridge    100    10.100.0.128/25   Privacy/encrypted traffic
+ai-      AI             200    10.200.0.128/25   AI/ML workloads
+web-     Web            200    10.200.1.128/25   Web service containers
+db-      Database       200    10.200.2.128/25   Database containers
+mgr-     Management     300    10.30.0.128/25    Management plane
+ctl-     Control        300    10.30.1.128/25    Control plane
+mon-     Monitoring     300    10.30.2.128/25    Monitoring/observability
+nm0      Netmaker       -      10.50.0.128/25    WireGuard mesh overlay
 ```
 
-TWO SEPARATE SOCKET NETWORKS:
-
-  PRIVACY SOCKETS (priv_*) - 3 Containers in tunnel chain, NO Netmaker:
-    priv_wg       → CT 100: WireGuard gateway (entry) - OVS internal port
-    priv_warp     → CT 101: Cloudflare WARP tunnel (middle) - OVS internal port
-    priv_xray     → CT 102: XRay client (exit to VPS) - OVS internal port
-
-  CONTAINER SOCKETS (sock_{container_name}) - DYNAMIC, uses Netmaker for cross-node:
-    Ports are created DYNAMICALLY from container names:
-    • Container "vectordb-prod" starts → sock_vectordb-prod created
-    • Container stops → sock_{name} removed
-    • OpenFlow rules installed/removed with container lifecycle
-
-NOTE: mgmt0 is the SINGLE management port. It gets the INTROSPECTED IP from the 
-      physical uplink (e.g., 192.168.1.100/24). The uplink loses its IP when 
-      added to the bridge. Both privacy and container networks use socket 
-      networking (OVS internal ports), but are SEPARATE namespaces.
-
-### TRAFFIC SEPARATION
-
+### OVS BRIDGE CONFIGURATION
 ```
-NETWORK TYPE      TRANSPORT                    PORTS INVOLVED
-─────────────────────────────────────────────────────────────────────────────────────
-Privacy           Socket + OpenFlow            priv_wg(CT100), priv_warp(CT101), priv_xray(CT102)
-                  3 LXC containers             NO Netmaker, direct tunnel chain
-Container         Socket + OpenFlow            sock_vectordb, sock_llm, etc.
-                  Function-based routing       Local: OpenFlow to sock_*
-                  Cross-node: OpenFlow → nm0   Remote: OpenFlow → nm0 → sock_*
-Management        mgmt0 (SINGLE port)          Host management access (has uplink IP)
+BRIDGE     DATAPATH   FAIL_MODE   IP            DESCRIPTION
+──────────────────────────────────────────────────────────────────────
+ovs-br0    netdev     secure      10.0.0.1/16   Single unified switch
 ```
 
-BOTH use socket networking + OpenFlow but are SEPARATE:
-  • priv_* sockets → Privacy tunnel chain (3 containers, OpenFlow, never touches Netmaker)
-  • sock_* sockets → Function-based routing (OpenFlow, cross-node via nm0)
+### IP ADDRESS ALLOCATION (/25 subnets, gateway .129)
+```
+NETWORK           SUBNET            GATEWAY        RANGE           PORT PREFIX
+─────────────────────────────────────────────────────────────────────────────
+GhostBridge       10.100.0.128/25   10.100.0.129   .130-.254       gb-
+AI Workloads      10.200.0.128/25   10.200.0.129   .130-.254       ai-
+Web Services      10.200.1.128/25   10.200.1.129   .130-.254       web-
+Databases         10.200.2.128/25   10.200.2.129   .130-.254       db-
+Management        10.30.0.128/25    10.30.0.129    .130-.254       mgr-
+Control           10.30.1.128/25    10.30.1.129    .130-.254       ctl-
+Monitoring        10.30.2.128/25    10.30.2.129    .130-.254       mon-
+Netmaker-Mesh     10.50.0.128/25    10.50.0.129    .130-.254       nm0
+```
 
-### EXPECTED STATE (What Should Exist)
+### TRAFFIC FLOW RULES
+```
+TRAFFIC TYPE              ACTION
+─────────────────────────────────────────────────────────────────
+GhostBridge → Netmaker    Route gb-* traffic through nm0 for encryption
+Intra-VLAN                Normal L2 switching within same VLAN
+Inter-VLAN                Isolated by default (no cross-VLAN traffic)
+```
 
-When properly configured:
-1. **Single bridge**: `ovs-br0` (datapath=system, fail_mode=secure)
-2. **Management port**: `mgmt0` (internal, IP from introspected uplink)
-3. **Netmaker port**: `nm0` enslaved to ovs-br0 (for CONTAINER sockets only)
-4. **Uplink port**: Physical NIC (introspected name AND IP, IP moved to mgmt0)
-5. **Privacy sockets**: `priv_wg`(CT100), `priv_warp`(CT101), `priv_xray`(CT102) - 3 containers
-6. **Container sockets**: `sock_*` (cross-node via nm0)
+### QoS POLICY (Task-Based)
+```
+PORT PREFIX    QUEUE    PRIORITY
+────────────────────────────────────
+ai-*           1        High bandwidth
+web-*          0        Normal
+db-*           2        Low latency
+```
 
-### FORBIDDEN
+### SOCKET PATHS (Native Protocol Access)
+```
+SERVICE          SOCKET PATH                           PROTOCOL
+────────────────────────────────────────────────────────────────
+OVSDB            /var/run/openvswitch/db.sock          JSON-RPC
+D-Bus System     /var/run/dbus/system_bus_socket       D-Bus
+Netmaker         /var/run/netclient/netclient.sock     gRPC
+```
 
-- ❌ Multiple OVS bridges (only ovs-br0)
-- ❌ Hardcoded physical interface names (must introspect)
-- ❌ Netmaker as separate bridge (must be port on ovs-br0)
-- ❌ Missing management port (mgmt0 required)
-- ❌ Privacy traffic through Netmaker (priv_* sockets use direct tunnel only)
-- ❌ Mixing socket namespaces (priv_* and sock_* are SEPARATE networks)
-- ❌ veth-based container networking (use sock_* internal ports instead)
-- ❌ CLI tools (ovs-vsctl, ip, nmcli) - use native protocols only
+### NETMAKER OVERLAY
+```
+Interface:      nm0
+Network:        privacy-mesh  
+IP:             10.50.0.129/25
+WireGuard Port: 51820/UDP
+MTU:            1420
+Enslaved to:    ovs-br0
+Purpose:        Encrypted tunnel for GhostBridge (gb-*) traffic
+```
+
+### EXPECTED STATE
+When properly configured, the system should have:
+- Single OVS bridge: ovs-br0 (datapath=netdev, fail_mode=secure)
+- Netmaker interface nm0 as port on ovs-br0
+- Ports follow naming convention: gb-*, ai-*, web-*, db-*, mgr-*, ctl-*, mon-*
+- VLAN tags applied per port prefix (100/200/300)
+- OpenFlow rules for GhostBridge→Netmaker routing and QoS
+
+Use native tools (OVSDB JSON-RPC, rtnetlink) to configure - NOT shell commands like ovs-vsctl or ip.
+
+### LXC DEFAULTS
+- **Template**: Always use `local-btrfs:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst` (Debian 13) unless specified otherwise.
+- **Storage**: Use `local-btrfs` for rootfs.
+- **Networking**:
+  - For standard containers: `eth0` attached to `ovs-br0` via veth pair.
+  - For Netmaker gateway: Attached to `mesh` bridge (if applicable) or `ovs-br0` with special routing.
+- **Privacy Chain**:
+  - `priv_wg` (WireGuard Gateway): Separate container, handles external VPN connection.
+  - `priv_warp` (Cloudflare WARP): Separate container, routes traffic via WARP.
+  - `priv_xray` (Xray Proxy): Separate container, routes traffic via Xray.
+  - **Do NOT** use host interfaces for these; create containers to ensure routing isolation.
 
 ## ⚠️ CRITICAL: FORCED TOOL EXECUTION ARCHITECTURE
 
@@ -570,7 +334,7 @@ Your OVS tools use:
 - **Generic Netlink** - Direct kernel communication for datapaths
 
 ### READ Operations:
-- `ovs_capabilities` - Check if OVS is running
+- `ovs_check_available` - Check if OVS is running
 - `ovs_list_bridges` - List all OVS bridges
 - `ovs_list_ports` - List ports on a bridge
 - `ovs_get_bridge_info` - Get detailed bridge info
@@ -586,8 +350,9 @@ Your OVS tools use:
 
 ### Absolutely Forbidden:
 - `ovs-vsctl` - Use OVSDB JSON-RPC tools instead
-- `ovs-ofctl` - Use native OpenFlow client (op-network/src/openflow.rs)
-- `ovs-dpctl` - Use Generic Netlink tools (op-network/src/ovs_netlink.rs)
+- `ovs-ofctl` - Use native OpenFlow tools instead
+- `ovs-flowctl` - Use native OpenFlow/OVS tools instead
+- `ovs-dpctl` - Use Generic Netlink tools instead
 - `ovs-appctl` - FORBIDDEN
 - `ovsdb-client` - Use native JSON-RPC instead
 - `systemctl` - Use D-Bus systemd1 interface instead
@@ -610,7 +375,7 @@ Your OVS tools use:
 | `ovs-vsctl add-br br0`    | `ovs_create_bridge {"name": "br0"}`       |
 | `ovs-vsctl list-br`       | `ovs_list_bridges {}`                     |
 | `systemctl restart nginx` | D-Bus: systemd1.Manager.RestartUnit       |
-| `ip addr show`            | `rtnetlink_list_interfaces {}`         |
+| `ip addr show`            | `list_network_interfaces {}`              |
 | `nmcli con show`          | D-Bus: NetworkManager.GetAllDevices       |
 
 ## op-dbus topography (canonical, end-to-end)
@@ -887,6 +652,7 @@ For reading files (safe operations):
 5. Use native protocol tools (D-Bus, OVSDB JSON-RPC, rtnetlink) exclusively
 6. Report actual tool results, not imagined outcomes
 7. If no native tool exists for an operation, use `cannot_perform` to explain
+8. **THOUGHT PROCESS**: For complex tasks, you MUST use the `sequential-thinking` tool to plan your steps and explain your reasoning. This allows the user to see your thought process.
 
 ## Assistant Roles (Important)
 

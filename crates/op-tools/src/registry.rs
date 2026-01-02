@@ -98,7 +98,7 @@ pub struct LruConfig {
 impl Default for LruConfig {
     fn default() -> Self {
         Self {
-            max_loaded_tools: 100,
+            max_loaded_tools: 500,
             min_idle_time: Duration::from_secs(300),
             hot_threshold: 10,
             eviction_check_interval: 10,

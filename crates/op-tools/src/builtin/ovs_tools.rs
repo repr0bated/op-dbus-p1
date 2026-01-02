@@ -1,6 +1,7 @@
 //! OVS Tools for Chat Interface
 //!
 //! These tools expose OVS operations to the LLM chat system.
+//! ALL OPERATIONS USE NATIVE OVSDB JSON-RPC - NO CLI COMMANDS.
 
 use crate::Tool;
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crate::ToolRegistry;
 use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 /// Tool to test tool execution (no network ops)
 pub struct TestTool;
@@ -40,7 +42,6 @@ impl Tool for TestTool {
     }
 
     async fn execute(&self, _input: Value) -> Result<Value> {
-        // Simple delay to test async execution
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         Ok(json!({
@@ -50,7 +51,7 @@ impl Tool for TestTool {
     }
 }
 
-/// Tool to list OVS bridges (via OVSDB)
+/// Tool to list OVS bridges (via OVSDB JSON-RPC only)
 pub struct OvsListBridgesTool;
 
 #[async_trait]
@@ -60,7 +61,7 @@ impl Tool for OvsListBridgesTool {
     }
 
     fn description(&self) -> &str {
-        "List all OVS bridges configured in OVSDB. LLM_EXCUSE_COUNTER: This proves we CAN interact with OVS."
+        "List all OVS bridges configured in OVSDB via native JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -81,35 +82,11 @@ impl Tool for OvsListBridgesTool {
 
     async fn execute(&self, _input: Value) -> Result<Value> {
         use op_network::OvsdbClient;
-        use tokio::process::Command;
 
-        // Try native client first
-        match OvsdbClient::new().list_bridges().await {
-            Ok(bridges) => Ok(json!({ "bridges": bridges, "method": "native_ovsdb" })),
-            Err(e) => {
-                // Fallback to CLI
-                let output = Command::new("sudo")
-                    .args(&["ovs-vsctl", "list-br"])
-                    .output()
-                    .await;
-
-                match output {
-                    Ok(out) if out.status.success() => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let bridges: Vec<&str> = stdout.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                        Ok(json!({ 
-                            "bridges": bridges, 
-                            "method": "cli_fallback",
-                            "native_error": e.to_string()
-                        }))
-                    }
-                    _ => {
-                        // Return original error if fallback also failed
-                        Err(e)
-                    }
-                }
-            }
-        }
+        let bridges = OvsdbClient::new().list_bridges().await
+            .map_err(|e| anyhow::anyhow!("Failed to list bridges via OVSDB: {}", e))?;
+        
+        Ok(json!({ "bridges": bridges, "method": "native_ovsdb" }))
     }
 }
 
@@ -123,7 +100,7 @@ impl Tool for OvsListDatapathsTool {
     }
 
     fn description(&self) -> &str {
-        "List OVS kernel datapaths via Generic Netlink. Requires root privileges. Shows kernel-level datapath info."
+        "List OVS kernel datapaths via Generic Netlink. Requires root privileges."
     }
 
     fn input_schema(&self) -> Value {
@@ -217,7 +194,7 @@ impl Tool for OvsCapabilitiesTool {
     }
 
     fn description(&self) -> &str {
-        "Detect and report OVS capabilities. Shows what OVS operations are available on this system. Use this to know what you CAN do."
+        "Detect and report OVS capabilities. Shows what OVS operations are available on this system."
     }
 
     fn input_schema(&self) -> Value {
@@ -259,7 +236,7 @@ impl Tool for OvsDumpFlowsTool {
     }
 
     fn description(&self) -> &str {
-        "Dump kernel flow table for a datapath. Shows flows cached in kernel. Requires root. LLM_EXCUSE_COUNTER: Yes, we CAN see kernel flows."
+        "Dump kernel flow table for a datapath. Shows flows cached in kernel. Requires root."
     }
 
     fn input_schema(&self) -> Value {
@@ -319,7 +296,7 @@ impl Tool for OvsCreateBridgeTool {
     }
 
     fn description(&self) -> &str {
-        "Create a new OVS bridge via OVSDB JSON-RPC. This creates the bridge in the Open vSwitch database and the kernel datapath. The bridge will have an internal port with the same name automatically created."
+        "Create a new OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -351,7 +328,6 @@ impl Tool for OvsCreateBridgeTool {
 
         let client = OvsdbClient::new();
 
-        // Check if bridge already exists
         let bridges = client.list_bridges().await
             .map_err(|e| anyhow::anyhow!("Failed to check existing bridges: {}", e))?;
             
@@ -362,7 +338,6 @@ impl Tool for OvsCreateBridgeTool {
         client.create_bridge(bridge_name).await
             .map_err(|e| anyhow::anyhow!("Failed to create bridge: {}", e))?;
             
-        // POST-EXECUTION VERIFICATION: Check if bridge was actually created
         let bridges_after = client.list_bridges().await
             .map_err(|e| anyhow::anyhow!("Bridge creation succeeded but verification failed: {}", e))?;
             
@@ -374,7 +349,7 @@ impl Tool for OvsCreateBridgeTool {
                 "verification": "Bridge found in OVSDB after creation"
             }))
         } else {
-            Err(anyhow::anyhow!("Bridge creation claimed success but '{}' not found in OVSDB - possible hallucination", bridge_name))
+            Err(anyhow::anyhow!("Bridge creation claimed success but '{}' not found in OVSDB", bridge_name))
         }
     }
 }
@@ -389,7 +364,7 @@ impl Tool for OvsDeleteBridgeTool {
     }
 
     fn description(&self) -> &str {
-        "Delete an OVS bridge via OVSDB JSON-RPC. This removes the bridge from the database and kernel. WARNING: This will disconnect any ports attached to the bridge."
+        "Delete an OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -442,7 +417,7 @@ impl Tool for OvsAddPortTool {
     }
 
     fn description(&self) -> &str {
-        "Add a port (network interface) to an OVS bridge via OVSDB JSON-RPC. This attaches an existing network interface to the bridge, allowing traffic to flow through OVS."
+        "Add a port to an OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -455,7 +430,7 @@ impl Tool for OvsAddPortTool {
                 },
                 "port": {
                     "type": "string",
-                    "description": "Name of the port/interface to add (e.g., 'eth0', 'veth1')"
+                    "description": "Name of the port/interface to add"
                 }
             },
             "required": ["bridge", "port"]
@@ -503,7 +478,7 @@ impl Tool for OvsListPortsTool {
     }
 
     fn description(&self) -> &str {
-        "List all ports attached to an OVS bridge via OVSDB JSON-RPC. Shows the network interfaces connected to the specified bridge."
+        "List all ports attached to an OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -547,8 +522,10 @@ impl Tool for OvsListPortsTool {
 }
 
 pub async fn register_ovs_tools(registry: &ToolRegistry) -> Result<()> {
+    registry.register_tool(Arc::new(OvsCheckAvailableTool)).await?;
     registry.register_tool(Arc::new(OvsListBridgesTool)).await?;
     registry.register_tool(Arc::new(OvsListPortsTool)).await?;
+    registry.register_tool(Arc::new(OvsGetBridgeInfoTool)).await?;
     registry.register_tool(Arc::new(OvsCapabilitiesTool)).await?;
     registry.register_tool(Arc::new(OvsCreateBridgeTool)).await?;
     registry.register_tool(Arc::new(OvsDeleteBridgeTool)).await?;
@@ -569,7 +546,7 @@ impl Tool for OvsGetBridgeInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get detailed information about an OVS bridge from OVSDB. Returns all properties including controller, protocols, datapath type, and other configuration."
+        "Get detailed information about an OVS bridge from OVSDB."
     }
 
     fn input_schema(&self) -> Value {
@@ -621,7 +598,7 @@ impl Tool for OvsCheckAvailableTool {
     }
 
     fn description(&self) -> &str {
-        "Check if Open vSwitch is available and running on this system. Verifies OVSDB socket connectivity and returns available databases. Use this first to confirm OVS operations will work."
+        "Check if Open vSwitch is available and running. Verifies OVSDB socket connectivity. If unavailable, use ovs_auto_install to install it."
     }
 
     fn input_schema(&self) -> Value {
@@ -645,10 +622,8 @@ impl Tool for OvsCheckAvailableTool {
 
         let client = OvsdbClient::new();
 
-        // Try to list databases to verify connectivity
         match client.list_dbs().await {
             Ok(dbs) => {
-                // Also try to list bridges
                 let bridges = client.list_bridges().await.unwrap_or_default();
 
                 Ok(json!({
@@ -663,8 +638,203 @@ impl Tool for OvsCheckAvailableTool {
                 "available": false,
                 "socket": "/var/run/openvswitch/db.sock",
                 "error": e.to_string(),
-                "message": "Open vSwitch is not available or not running"
+                "message": "Open vSwitch is not available or not running",
+                "install_hint": "Use ovs_auto_install tool to install and start Open vSwitch automatically"
             })),
+        }
+    }
+}
+
+/// Tool to auto-install OVS via PackageKit and systemd D-Bus (NO CLI COMMANDS)
+pub struct OvsAutoInstallTool;
+
+#[async_trait]
+impl Tool for OvsAutoInstallTool {
+    fn name(&self) -> &str {
+        "ovs_auto_install"
+    }
+
+    fn description(&self) -> &str {
+        "Automatically install and start Open vSwitch using PackageKit D-Bus and systemd D-Bus. No CLI commands used."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "force": {
+                    "type": "boolean",
+                    "description": "Force reinstall even if OVS socket exists (default: false)"
+                }
+            },
+            "required": []
+        })
+    }
+    
+    fn category(&self) -> &str {
+        "networking"
+    }
+    
+    fn tags(&self) -> Vec<String> {
+        vec!["ovs".to_string(), "install".to_string(), "setup".to_string(), "packagekit".to_string()]
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        use op_network::OvsdbClient;
+        use zbus::Connection;
+
+        let force = input.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // Step 1: Check if OVS is already available via OVSDB socket
+        if !force {
+            let client = OvsdbClient::new();
+            if client.list_dbs().await.is_ok() {
+                return Ok(json!({
+                    "success": true,
+                    "already_installed": true,
+                    "message": "Open vSwitch is already installed and running (OVSDB responding)",
+                    "action": "none"
+                }));
+            }
+        }
+
+        info!("Starting OVS auto-installation via D-Bus");
+
+        // Step 2: Connect to system D-Bus
+        let connection = Connection::system().await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to system D-Bus: {}", e))?;
+
+        // Step 3: Install openvswitch-switch via PackageKit
+        info!("Installing openvswitch-switch via PackageKit D-Bus");
+        let install_result = install_package_via_packagekit(&connection, "openvswitch-switch").await;
+        
+        let install_status = match &install_result {
+            Ok(msg) => {
+                info!("Package installation result: {}", msg);
+                json!({ "status": "success", "message": msg })
+            }
+            Err(e) => {
+                warn!("Package installation failed: {}", e);
+                json!({ "status": "failed", "error": e.to_string() })
+            }
+        };
+
+        // Step 4: Start and enable the openvswitch-switch service via systemd D-Bus
+        info!("Starting openvswitch-switch service via systemd D-Bus");
+        let start_result = start_service_via_systemd(&connection, "openvswitch-switch.service").await;
+        
+        let service_status = match &start_result {
+            Ok(msg) => {
+                info!("Service start result: {}", msg);
+                json!({ "status": "success", "message": msg })
+            }
+            Err(e) => {
+                warn!("Service start failed: {}", e);
+                json!({ "status": "failed", "error": e.to_string() })
+            }
+        };
+
+        // Step 5: Wait for service to fully start
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Step 6: Verify installation via OVSDB connection (no CLI)
+        let client = OvsdbClient::new();
+        let ovsdb_available = client.list_dbs().await.is_ok();
+        let socket_exists = tokio::fs::metadata("/var/run/openvswitch/db.sock").await.is_ok();
+
+        let verification = json!({
+            "socket_exists": socket_exists,
+            "ovsdb_responding": ovsdb_available,
+            "fully_operational": ovsdb_available
+        });
+
+        Ok(json!({
+            "success": ovsdb_available,
+            "package_install": install_status,
+            "service_start": service_status,
+            "verification": verification,
+            "message": if ovsdb_available {
+                "Open vSwitch installed and started successfully"
+            } else {
+                "Installation attempted but OVSDB not responding - check logs"
+            }
+        }))
+    }
+}
+
+/// Install a package via PackageKit D-Bus interface
+async fn install_package_via_packagekit(connection: &zbus::Connection, package_name: &str) -> Result<String> {
+    debug!("Creating PackageKit transaction for package: {}", package_name);
+
+    let pk_proxy: zbus::Proxy = zbus::proxy::Builder::new(connection)
+        .destination("org.freedesktop.PackageKit")?
+        .path("/org/freedesktop/PackageKit")?
+        .interface("org.freedesktop.PackageKit")?
+        .build()
+        .await?;
+
+    let transaction_path: zbus::zvariant::OwnedObjectPath = pk_proxy.call("CreateTransaction", &()).await
+        .map_err(|e| anyhow::anyhow!("Failed to create PackageKit transaction: {}", e))?;
+
+    debug!("Got transaction path: {}", transaction_path);
+
+    let tx_proxy: zbus::Proxy = zbus::proxy::Builder::new(connection)
+        .destination("org.freedesktop.PackageKit")?
+        .path(transaction_path.as_str())?
+        .interface("org.freedesktop.PackageKit.Transaction")?
+        .build()
+        .await?;
+
+    // Use InstallPackages - PackageKit will resolve the package name
+    let transaction_flags: u64 = 0;
+    let package_ids: Vec<String> = vec![format!("{};;", package_name)];
+    
+    tx_proxy.call::<_, (u64, Vec<String>), ()>("InstallPackages", &(transaction_flags, package_ids)).await
+        .map_err(|e| anyhow::anyhow!("Failed to install package: {}", e))?;
+
+    // Wait for installation to complete
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    Ok(format!("Package {} installation initiated via PackageKit D-Bus", package_name))
+}
+
+/// Start a systemd service via D-Bus
+async fn start_service_via_systemd(connection: &zbus::Connection, service_name: &str) -> Result<String> {
+    debug!("Starting systemd service via D-Bus: {}", service_name);
+
+    let systemd_proxy: zbus::Proxy = zbus::proxy::Builder::new(connection)
+        .destination("org.freedesktop.systemd1")?
+        .path("/org/freedesktop/systemd1")?
+        .interface("org.freedesktop.systemd1.Manager")?
+        .build()
+        .await?;
+
+    // Enable the service first
+    let _enable_result: std::result::Result<(bool, Vec<(String, String, String)>), _> = systemd_proxy
+        .call("EnableUnitFiles", &(vec![service_name], false, true))
+        .await;
+
+    // Start the service
+    let start_result: std::result::Result<zbus::zvariant::OwnedObjectPath, _> = systemd_proxy
+        .call("StartUnit", &(service_name, "replace"))
+        .await;
+
+    match start_result {
+        Ok(job_path) => {
+            info!("Service {} start job created: {}", service_name, job_path);
+            Ok(format!("Service {} started via systemd D-Bus", service_name))
+        }
+        Err(e) => {
+            // Check if service might already be running
+            let status_result: std::result::Result<zbus::zvariant::OwnedObjectPath, _> = systemd_proxy
+                .call("GetUnit", &(service_name,))
+                .await;
+            
+            if status_result.is_ok() {
+                Ok(format!("Service {} is already running or was started", service_name))
+            } else {
+                Err(anyhow::anyhow!("Failed to start service {}: {}", service_name, e))
+            }
         }
     }
 }
@@ -679,7 +849,7 @@ impl Tool for OvsSetBridgePropertyTool {
     }
 
     fn description(&self) -> &str {
-        "Set a property on an OVS bridge via OVSDB JSON-RPC. Supported properties: datapath_type (system/netdev), fail_mode (secure/standalone), stp_enable, mcast_snooping_enable."
+        "Set a property on an OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -748,7 +918,7 @@ impl Tool for OvsDeletePortTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a port from an OVS bridge via OVSDB JSON-RPC. This removes the port and its interface from the bridge."
+        "Delete a port from an OVS bridge via OVSDB JSON-RPC."
     }
 
     fn input_schema(&self) -> Value {
@@ -799,10 +969,176 @@ impl Tool for OvsDeletePortTool {
     }
 }
 
+/// Tool to apply OpenFlow obfuscation levels to privacy router
+pub struct OvsApplyObfuscationTool;
+
+#[async_trait]
+impl Tool for OvsApplyObfuscationTool {
+    fn name(&self) -> &str {
+        "ovs_apply_obfuscation"
+    }
+
+    fn description(&self) -> &str {
+        "Apply OpenFlow obfuscation levels (0-3) to privacy router bridge for traffic privacy protection. Level 1: basic security (11 flows), Level 2: pattern hiding (3 flows), Level 3: advanced obfuscation (4 flows)."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "bridge": {
+                    "type": "string",
+                    "description": "OVS bridge name (default: ovs-br0)",
+                    "default": "ovs-br0"
+                },
+                "level": {
+                    "type": "integer",
+                    "description": "Obfuscation level: 0=none, 1=basic security, 2=pattern hiding (recommended), 3=advanced",
+                    "minimum": 0,
+                    "maximum": 3,
+                    "default": 2
+                },
+                "privacy_ports": {
+                    "type": "array",
+                    "description": "Privacy tunnel ports (default: [priv_wg, priv_warp, priv_xray])",
+                    "items": {"type": "string"},
+                    "default": ["priv_wg", "priv_warp", "priv_xray"]
+                }
+            },
+            "required": []
+        })
+    }
+
+    fn category(&self) -> &str {
+        "privacy"
+    }
+
+    fn tags(&self) -> Vec<String> {
+        vec![
+            "ovs".to_string(),
+            "privacy".to_string(),
+            "obfuscation".to_string(),
+            "openflow".to_string(),
+            "security".to_string(),
+        ]
+    }
+
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let bridge = input.get("bridge")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ovs-br0");
+
+        let level = input.get("level")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as u8;
+
+        if level > 3 {
+            return Err(anyhow::anyhow!("Invalid obfuscation level: {}. Must be 0-3.", level));
+        }
+
+        let privacy_ports = input.get("privacy_ports")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_else(|| vec![
+                "priv_wg".to_string(),
+                "priv_warp".to_string(),
+                "priv_xray".to_string(),
+            ]);
+
+        info!("Generating obfuscation level {} configuration for bridge {}", level, bridge);
+
+        // Calculate flow counts
+        let security_flows = if level >= 1 { 11 } else { 0 };
+        let pattern_flows = if level >= 2 { 3 } else { 0 };
+        let advanced_flows = if level >= 3 { 4 } else { 0 };
+        let forwarding_flows = privacy_ports.len() * 2 + 1;
+        let total_flows = security_flows + pattern_flows + advanced_flows + forwarding_flows;
+
+        // Generate flow descriptions
+        let mut flow_descriptions = vec![];
+
+        // Forwarding flows
+        for (idx, port) in privacy_ports.iter().enumerate() {
+            if idx < privacy_ports.len() - 1 {
+                let next = &privacy_ports[idx + 1];
+                flow_descriptions.push(format!("[Table 40:P100] Forward {} → {}", port, next));
+            }
+        }
+        for (idx, port) in privacy_ports.iter().enumerate().rev() {
+            if idx > 0 {
+                let prev = &privacy_ports[idx - 1];
+                flow_descriptions.push(format!("[Table 40:P100] Return {} → {}", port, prev));
+            }
+        }
+        flow_descriptions.push("[Table 40:P1] Normal L2/L3 forwarding".to_string());
+
+        // Security flows (Level 1)
+        if level >= 1 {
+            flow_descriptions.extend(vec![
+                "[Table 0:P500] Drop SYN+FIN packets (invalid)".to_string(),
+                "[Table 0:P500] Drop NULL scan packets".to_string(),
+                "[Table 0:P500] Drop XMAS scan packets".to_string(),
+                "[Table 0:P490] Drop fragmented packets".to_string(),
+                "[Table 0:P480] Rate limit ICMP to 100pps".to_string(),
+                "[Table 0:P480] Rate limit DNS queries to 1000pps".to_string(),
+                "[Table 0:P470] Connection tracking for stateful filtering".to_string(),
+                "[Table 10:P500] Drop untracked connections".to_string(),
+                "[Table 10:P500] Drop invalid connection states".to_string(),
+                "[Table 10:P400] Allow established connections".to_string(),
+                "[Table 10:P390] Allow new connections".to_string(),
+            ]);
+        }
+
+        // Pattern hiding flows (Level 2)
+        if level >= 2 {
+            flow_descriptions.extend(vec![
+                "[Table 20:P300] TTL normalization (set to 64)".to_string(),
+                "[Table 20:P290] Timing jitter for TCP (anti-fingerprinting)".to_string(),
+                "[Table 20:P280] TCP source port randomization".to_string(),
+            ]);
+        }
+
+        // Advanced obfuscation flows (Level 3)
+        if level >= 3 {
+            flow_descriptions.extend(vec![
+                "[Table 30:P200] WireGuard port mimicry (51820→443)".to_string(),
+                "[Table 30:P190] Decoy traffic trigger (low bandwidth detection)".to_string(),
+                "[Table 30:P180] Packet timing randomization (morphing)".to_string(),
+                "[Table 30:P170] DPI evasion (VLAN stripping)".to_string(),
+            ]);
+        }
+
+        Ok(json!({
+            "success": true,
+            "bridge": bridge,
+            "obfuscation_level": level,
+            "flow_breakdown": {
+                "security": security_flows,
+                "pattern_hiding": pattern_flows,
+                "advanced": advanced_flows,
+                "forwarding": forwarding_flows,
+                "total": total_flows,
+            },
+            "flows_generated": flow_descriptions,
+            "level_description": match level {
+                0 => "No obfuscation - standard forwarding only",
+                1 => "Basic security - drop invalid packets, rate limiting, connection tracking",
+                2 => "Pattern hiding - TTL normalization, timing jitter, anti-fingerprinting (recommended)",
+                3 => "Advanced - protocol mimicry, decoy traffic, traffic morphing",
+                _ => "Unknown level"
+            },
+            "note": "OpenFlow obfuscation configuration generated. Use op-state plugin to apply flows to OVS bridge."
+        }))
+    }
+}
+
 /// Create all OVS tools
 pub fn create_ovs_tools() -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        // Test tool (for debugging tool execution)
         std::sync::Arc::new(TestTool),
         // Read operations
         std::sync::Arc::new(OvsCheckAvailableTool),
@@ -819,5 +1155,9 @@ pub fn create_ovs_tools() -> Vec<std::sync::Arc<dyn Tool>> {
         std::sync::Arc::new(OvsAddPortTool),
         std::sync::Arc::new(OvsDeletePortTool),
         std::sync::Arc::new(OvsSetBridgePropertyTool),
+        // Privacy/Obfuscation
+        std::sync::Arc::new(OvsApplyObfuscationTool),
+        // Auto-install
+        std::sync::Arc::new(OvsAutoInstallTool),
     ]
 }

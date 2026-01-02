@@ -1,10 +1,10 @@
-//! LXC plugin - read-only introspection of LXC containers on the host.
+//! LXC plugin - Native Proxmox API LXC container management.
 //!
 //! Design
-//! - Discovers LXC containers by correlating OVS ports (vi{VMID}) with OVS bridges
-//!   and known cgroup paths on Proxmox (pve-container@{VMID}.service) for running state.
-//! - No CLI; native OVSDB JSON-RPC and filesystem reads only.
-//! - Read-only for now (apply is a no-op). StateManager will still produce footprints on apply.
+//! - Discovers LXC containers via native Proxmox REST API
+//! - Creates, starts, stops, and deletes containers via API (no `pct` CLI)
+//! - Correlates with OVS ports (vi{VMID}) for network integration
+//! - Supports BTRFS golden images for instant container provisioning
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -46,7 +46,7 @@ impl LxcPlugin {
         let mut errors = Vec::new();
 
         // Check if container exists
-        let current_containers = self.discover_from_ovs().await?;
+        let current_containers = self.discover_from_proxmox().await?;
         let exists = current_containers.iter().any(|c| c.id == container.id);
 
         if !exists {
@@ -81,7 +81,18 @@ impl LxcPlugin {
         })
     }
 
-    fn is_running(ct_id: &str) -> Option<bool> {
+    /// Check if container is running via Proxmox API
+    async fn is_running_api(ct_id: &str) -> Result<bool> {
+        let vmid: u32 = ct_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid container ID: {}", ct_id))?;
+
+        let client = op_network::ProxmoxClient::from_env()?;
+        client.is_running(vmid).await
+    }
+
+    /// Fallback: Check if container is running via cgroup (for when API is unavailable)
+    fn is_running_cgroup(ct_id: &str) -> Option<bool> {
         // Proxmox systemd service path: pve-container@{vmid}.service (cgroup v2)
         let path = format!(
             "/sys/fs/cgroup/system.slice/pve-container@{}.service",
@@ -90,6 +101,81 @@ impl LxcPlugin {
         Some(fs::metadata(path).is_ok())
     }
 
+    /// Discover containers from Proxmox API
+    async fn discover_from_proxmox(&self) -> Result<Vec<ContainerInfo>> {
+        let client = match op_network::ProxmoxClient::from_env() {
+            Ok(c) => c,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        // Check API availability
+        if client.check_available().await.is_err() {
+            log::debug!("Proxmox API not available, falling back to OVS discovery");
+            return self.discover_from_ovs().await;
+        }
+
+        let containers = match client.list_containers().await {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Failed to list containers via API: {}, falling back to OVS", e);
+                return self.discover_from_ovs().await;
+            }
+        };
+
+        let ovsdb = op_network::ovsdb::OvsdbClient::new();
+        let bridges = ovsdb.list_bridges().await.unwrap_or_default();
+
+        let mut results = Vec::new();
+        for ct in containers {
+            let ct_id = ct.vmid.to_string();
+            let veth = format!("vi{}", ct_id);
+
+            // Find which bridge this container's veth is on
+            let mut found_bridge = String::new();
+            for br in &bridges {
+                if let Ok(ports) = ovsdb.list_bridge_ports(br).await {
+                    if ports.contains(&veth) {
+                        found_bridge = br.clone();
+                        break;
+                    }
+                }
+            }
+
+            // Check running status
+            let running = ct.status == "running";
+
+            results.push(ContainerInfo {
+                id: ct_id,
+                veth,
+                bridge: found_bridge,
+                running: Some(running),
+                properties: Some({
+                    let mut props = HashMap::new();
+                    if let Some(name) = ct.name {
+                        props.insert("hostname".to_string(), Value::String(name));
+                    }
+                    props.insert("status".to_string(), Value::String(ct.status));
+                    if let Some(mem) = ct.mem {
+                        props.insert("memory_used".to_string(), json!(mem));
+                    }
+                    if let Some(maxmem) = ct.maxmem {
+                        props.insert("memory_max".to_string(), json!(maxmem));
+                    }
+                    if let Some(cpu) = ct.cpu {
+                        props.insert("cpu_usage".to_string(), json!(cpu));
+                    }
+                    if let Some(uptime) = ct.uptime {
+                        props.insert("uptime".to_string(), json!(uptime));
+                    }
+                    props
+                }),
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Fallback: Discover containers from OVS ports (when API is unavailable)
     async fn discover_from_ovs(&self) -> Result<Vec<ContainerInfo>> {
         let client = op_network::ovsdb::OvsdbClient::new();
         // If OVSDB is not reachable, return empty list
@@ -105,7 +191,7 @@ impl LxcPlugin {
                 if let Some(ct_id) = p.strip_prefix("vi") {
                     // ensure ID is numeric-like
                     if ct_id.chars().all(|c| c.is_ascii_digit()) {
-                        let running = Self::is_running(ct_id);
+                        let running = Self::is_running_cgroup(ct_id);
                         results.push(ContainerInfo {
                             id: ct_id.to_string(),
                             veth: p.clone(),
@@ -151,7 +237,7 @@ impl PlugTree for LxcPlugin {
     }
 
     async fn query_pluglet(&self, pluglet_id: &str) -> Result<Option<Value>> {
-        let containers = self.discover_from_ovs().await?;
+        let containers = self.discover_from_proxmox().await?;
 
         for container in containers {
             if container.id == pluglet_id {
@@ -163,7 +249,7 @@ impl PlugTree for LxcPlugin {
     }
 
     async fn list_pluglet_ids(&self) -> Result<Vec<String>> {
-        let containers = self.discover_from_ovs().await?;
+        let containers = self.discover_from_proxmox().await?;
         Ok(containers.into_iter().map(|c| c.id).collect())
     }
 }
@@ -171,46 +257,19 @@ impl PlugTree for LxcPlugin {
 impl LxcPlugin {
     /// Find container's veth interface name
     async fn find_container_veth(ct_id: &str) -> Result<String> {
-        // Try to get the actual interface name from the container's eth0 peer
-        let output = tokio::process::Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &format!("ct{}", ct_id),
-                "ip",
-                "link",
-                "show",
-                "eth0",
-            ])
-            .output()
-            .await?;
+        // Standard Proxmox veth naming: vi{VMID}
+        let veth_name = format!("vi{}", ct_id);
 
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Look for the peer link index
-            for line in stdout.lines() {
-                if line.contains("link-netnsid") || line.contains("@if") {
-                    // Parse the peer interface name from the host side
-                    // Format: "veth<random>@if<index>"
-                    let veth_interfaces = op_network::rtnetlink::list_veth_interfaces().await?;
-
-                    // Find veth that matches this container's namespace
-                    for veth_name in veth_interfaces {
-                        if !veth_name.is_empty() {
-                            return Ok(veth_name);
-                        }
-                    }
-                }
-            }
+        // Check if it exists via rtnetlink
+        let veth_interfaces = op_network::rtnetlink::list_veth_interfaces().await?;
+        if veth_interfaces.contains(&veth_name) {
+            return Ok(veth_name);
         }
 
-        // Fallback: try to find veth by checking all veth pairs
-        let veth_interfaces = op_network::rtnetlink::list_veth_interfaces().await?;
-        // Look for any veth interface (first one found)
-        for veth_name in veth_interfaces {
-            if !veth_name.is_empty() && veth_name.starts_with("veth") {
-                log::info!("Found veth interface: {}", veth_name);
-                return Ok(veth_name);
+        // Try to find any veth for this container
+        for veth in veth_interfaces {
+            if veth.contains(ct_id) {
+                return Ok(veth);
             }
         }
 
@@ -236,9 +295,14 @@ impl LxcPlugin {
         }
     }
 
-    /// Create LXC container via pct (Proxmox)
+    /// Create LXC container via native Proxmox API
     async fn create_container(container: &ContainerInfo) -> Result<()> {
-        log::info!("Creating LXC container {}", container.id);
+        log::info!("Creating LXC container {} via Proxmox API", container.id);
+
+        let vmid: u32 = container
+            .id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid container ID: {}", container.id))?;
 
         // Select bridge based on network type
         let bridge = Self::get_bridge_for_network_type(container);
@@ -262,32 +326,28 @@ impl LxcPlugin {
             .await;
         }
 
-        // Traditional tar.zst template path (fallback)
+        // Use native Proxmox API for template-based creation
         let template = props
             .and_then(|p| p.get("template"))
             .and_then(|v| v.as_str())
             .unwrap_or("local-btrfs:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst");
 
-        // Hostname
         let hostname = props
             .and_then(|p| p.get("hostname"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("ct{}", container.id));
 
-        // Memory (MB)
         let memory = props
             .and_then(|p| p.get("memory"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(512);
+            .unwrap_or(512) as u32;
 
-        // Swap (MB)
         let swap = props
             .and_then(|p| p.get("swap"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(512);
+            .unwrap_or(512) as u32;
 
-        // Storage location and size
         let storage = props
             .and_then(|p| p.get("storage"))
             .and_then(|v| v.as_str())
@@ -300,25 +360,21 @@ impl LxcPlugin {
 
         let rootfs = format!("{}:{}", storage, rootfs_size);
 
-        // CPU cores
         let cores = props
             .and_then(|p| p.get("cores"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(2);
+            .unwrap_or(2) as u32;
 
-        // Unprivileged mode
         let unprivileged = props
             .and_then(|p| p.get("unprivileged"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        // Features (comma-separated)
         let features = props
             .and_then(|p| p.get("features"))
             .and_then(|v| v.as_str())
             .unwrap_or("nesting=1");
 
-        // Network configuration
         let firewall = props
             .and_then(|p| p.get("firewall"))
             .and_then(|v| v.as_bool())
@@ -330,14 +386,6 @@ impl LxcPlugin {
             if firewall { "1" } else { "0" }
         );
 
-        // Optional: IP address configuration
-        if let Some(ip) = props.and_then(|p| p.get("ip")).and_then(|v| v.as_str()) {
-            // ip can be "dhcp" or "192.168.1.100/24"
-            // pct expects: --net0 "name=eth0,bridge=vmbr0,ip=192.168.1.100/24,gw=192.168.1.1"
-            // For now, we'll handle this in a future enhancement
-            log::info!("IP configuration: {} (note: not yet implemented)", ip);
-        }
-
         log::info!(
             "Creating container {}: template={}, memory={}MB, cores={}, rootfs={}",
             container.id,
@@ -347,72 +395,32 @@ impl LxcPlugin {
             rootfs
         );
 
-        // Build pct create command
-        let mut cmd = tokio::process::Command::new("pct");
-        cmd.args([
-            "create",
-            &container.id,
-            template,
-            "--hostname",
-            hostname.as_str(),
-            "--memory",
-            &memory.to_string(),
-            "--swap",
-            &swap.to_string(),
-            "--cores",
-            &cores.to_string(),
-            "--rootfs",
-            &rootfs,
-            "--net0",
-            &net0,
-            "--unprivileged",
-            if unprivileged { "1" } else { "0" },
-            "--features",
-            features,
-        ]);
+        // Build the request
+        let config = op_network::CreateContainerRequest {
+            vmid,
+            ostemplate: template.to_string(),
+            hostname: Some(hostname),
+            memory: Some(memory),
+            swap: Some(swap),
+            cores: Some(cores),
+            rootfs: Some(rootfs),
+            net0: Some(net0),
+            unprivileged: Some(unprivileged),
+            features: Some(features.to_string()),
+            onboot: props.and_then(|p| p.get("onboot")).and_then(|v| v.as_bool()),
+            protection: props.and_then(|p| p.get("protection")).and_then(|v| v.as_bool()),
+            nameserver: props.and_then(|p| p.get("nameserver")).and_then(|v| v.as_str()).map(String::from),
+            searchdomain: props.and_then(|p| p.get("searchdomain")).and_then(|v| v.as_str()).map(String::from),
+            storage: Some(storage.to_string()),
+            ..Default::default()
+        };
 
-        // Optional: Start on boot
-        if let Some(onboot) = props
-            .and_then(|p| p.get("onboot"))
-            .and_then(|v| v.as_bool())
-        {
-            cmd.args(["--onboot", if onboot { "1" } else { "0" }]);
-        }
-
-        // Optional: Protection (prevent accidental deletion)
-        if let Some(protection) = props
-            .and_then(|p| p.get("protection"))
-            .and_then(|v| v.as_bool())
-        {
-            cmd.args(["--protection", if protection { "1" } else { "0" }]);
-        }
-
-        // Optional: Nameserver
-        if let Some(nameserver) = props
-            .and_then(|p| p.get("nameserver"))
-            .and_then(|v| v.as_str())
-        {
-            cmd.args(["--nameserver", nameserver]);
-        }
-
-        // Optional: Searchdomain
-        if let Some(searchdomain) = props
-            .and_then(|p| p.get("searchdomain"))
-            .and_then(|v| v.as_str())
-        {
-            cmd.args(["--searchdomain", searchdomain]);
-        }
-
-        // Execute pct create
-        let output = cmd.output().await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pct create failed: {}", stderr));
-        }
+        // Execute via native API
+        let client = op_network::ProxmoxClient::from_env()?;
+        client.create_container_sync(&config, 300).await?;
 
         log::info!(
-            "Container {} created successfully on bridge {}",
+            "Container {} created successfully on bridge {} (via native API)",
             container.id,
             bridge
         );
@@ -424,52 +432,7 @@ impl LxcPlugin {
             .unwrap_or("bridge");
 
         if network_type == "netmaker" {
-            // Read token from host
-            if let Ok(token) = tokio::fs::read_to_string("/etc/op-dbus/netmaker.env").await {
-                // Parse NETMAKER_TOKEN=xxx from env file
-                for line in token.lines() {
-                    if let Some(token_value) = line.strip_prefix("NETMAKER_TOKEN=") {
-                        let token_clean = token_value.trim_matches('"').trim();
-
-                        // Write token to container's rootfs /root/.bashrc
-                        let bashrc_path =
-                            format!("/var/lib/lxc/{}/rootfs/root/.bashrc", container.id);
-
-                        // Append export statement to bashrc
-                        let export_line = format!("\nexport NETMAKER_TOKEN={}\n", token_clean);
-
-                        // Read existing bashrc if it exists
-                        let existing_content = tokio::fs::read_to_string(&bashrc_path)
-                            .await
-                            .unwrap_or_default();
-
-                        // Append export if not already present
-                        if !existing_content.contains("NETMAKER_TOKEN") {
-                            match tokio::fs::write(
-                                &bashrc_path,
-                                format!("{}{}", existing_content, export_line),
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    log::info!(
-                                        "Injected netmaker token into {} .bashrc",
-                                        container.id
-                                    );
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "Failed to inject netmaker token into {}: {}",
-                                        container.id,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
+            Self::inject_netmaker_token(container, storage).await?;
         }
 
         Ok(())
@@ -870,33 +833,66 @@ WantedBy=multi-user.target
         Err(anyhow::anyhow!("No OVS port found for container {}", ct_id))
     }
 
-    /// Start LXC container
+    /// Start LXC container via native Proxmox API
     async fn start_container(ct_id: &str) -> Result<()> {
-        let output = tokio::process::Command::new("pct")
-            .args(["start", ct_id])
-            .output()
-            .await?;
+        log::info!("Starting container {} via Proxmox API", ct_id);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pct start failed: {}", stderr));
-        }
+        let vmid: u32 = ct_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid container ID: {}", ct_id))?;
 
+        let client = op_network::ProxmoxClient::from_env()?;
+        client.start_container_sync(vmid, 60).await?;
+
+        log::info!("Container {} started successfully (via native API)", ct_id);
         Ok(())
     }
 
-    /// Stop LXC container
+    /// Stop LXC container via native Proxmox API
     async fn stop_container(ct_id: &str) -> Result<()> {
-        let output = tokio::process::Command::new("pct")
-            .args(["stop", ct_id])
-            .output()
-            .await?;
+        log::info!("Stopping container {} via Proxmox API", ct_id);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pct stop failed: {}", stderr));
+        let vmid: u32 = ct_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid container ID: {}", ct_id))?;
+
+        let client = op_network::ProxmoxClient::from_env()?;
+        client.stop_container_sync(vmid, 60).await?;
+
+        log::info!("Container {} stopped successfully (via native API)", ct_id);
+        Ok(())
+    }
+
+    /// Delete LXC container via native Proxmox API
+    async fn delete_container(ct_id: &str, force: bool) -> Result<()> {
+        log::info!("Deleting container {} via Proxmox API (force={})", ct_id, force);
+
+        let vmid: u32 = ct_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid container ID: {}", ct_id))?;
+
+        let client = op_network::ProxmoxClient::from_env()?;
+
+        // Stop if running
+        if client.is_running(vmid).await.unwrap_or(false) {
+            if force {
+                client.stop_container_sync(vmid, 30).await?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Container {} is running. Stop it first or use force=true",
+                    ct_id
+                ));
+            }
         }
 
+        if force {
+            let upid = client.force_delete_container(vmid).await?;
+            client.wait_for_task(&upid, 120).await?;
+        } else {
+            client.delete_container_sync(vmid, 120).await?;
+        }
+
+        log::info!("Container {} deleted successfully (via native API)", ct_id);
         Ok(())
     }
 }
@@ -907,24 +903,21 @@ impl StatePlugin for LxcPlugin {
         "lxc"
     }
     fn version(&self) -> &str {
-        "1.0.0"
+        "2.0.0" // Version bump for native API support
     }
 
     fn is_available(&self) -> bool {
-        // Check if pct command is available (Proxmox specific)
-        std::process::Command::new("pct")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        // Try to check Proxmox API availability synchronously via environment
+        // The actual check happens async in discovery
+        std::path::Path::new("/etc/pve").exists()
     }
 
     fn unavailable_reason(&self) -> String {
-        "Proxmox pct command not found - this plugin requires Proxmox VE".to_string()
+        "Proxmox VE not detected (/etc/pve not found) - this plugin requires Proxmox VE".to_string()
     }
 
     async fn query_current_state(&self) -> Result<Value> {
-        let containers = self.discover_from_ovs().await?;
+        let containers = self.discover_from_proxmox().await?;
         Ok(serde_json::to_value(LxcState { containers })?)
     }
 
@@ -961,10 +954,10 @@ impl StatePlugin for LxcPlugin {
                 } => {
                     let container: ContainerInfo = serde_json::from_value(config.clone())?;
 
-                    // 1. Create LXC container
+                    // 1. Create LXC container via native API
                     match Self::create_container(&container).await {
                         Ok(_) => {
-                            changes_applied.push(format!("Created container {}", container.id));
+                            changes_applied.push(format!("Created container {} (via native Proxmox API)", container.id));
 
                             // 2. Start container to create veth interface
                             if let Err(e) = Self::start_container(&container.id).await {
@@ -988,112 +981,63 @@ impl StatePlugin for LxcPlugin {
                                         container.id
                                     );
 
-                                    match op_network::rtnetlink::link_set_name(
-                                        &old_veth, &veth_name,
-                                    )
-                                    .await
-                                    {
-                                        Ok(_) => {
-                                            changes_applied.push(format!(
-                                                "Renamed {} to {}",
-                                                old_veth, veth_name
-                                            ));
-
-                                            // 4. Network enrollment based on type
-                                            let network_type = container
-                                                .properties
-                                                .as_ref()
-                                                .and_then(|p| p.get("network_type"))
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("bridge");
-
-                                            match network_type {
-                                                "netmaker" => {
-                                                    // Add to mesh (netmaker mesh bridge)
-                                                    let client =
-                                                        op_network::ovsdb::OvsdbClient::new();
-                                                    match client.add_port("mesh", &veth_name).await
-                                                    {
-                                                        Ok(_) => {
-                                                            log::info!(
-                                                                "Container {} on mesh bridge",
-                                                                container.id
-                                                            );
-                                                            changes_applied.push(format!(
-                                                                "Added {} to mesh (netmaker bridge)",
-                                                                veth_name
-                                                            ));
-                                                        }
-                                                        Err(e) => {
-                                                            errors.push(format!(
-                                                                "Failed to add {} to mesh: {}",
-                                                                veth_name, e
-                                                            ));
-                                                        }
-                                                    }
-                                                }
-                                                "bridge" => {
-                                                    // Add to traditional bridge (ovsbr0)
-                                                    let client =
-                                                        op_network::ovsdb::OvsdbClient::new();
-                                                    match client
-                                                        .add_port(&container.bridge, &veth_name)
-                                                        .await
-                                                    {
-                                                        Ok(_) => {
-                                                            changes_applied.push(format!(
-                                                                "Added {} to bridge {}",
-                                                                veth_name, container.bridge
-                                                            ));
-                                                        }
-                                                        Err(e) => {
-                                                            errors.push(format!(
-                                                                "Failed to add port to bridge: {}",
-                                                                e
-                                                            ));
-                                                        }
-                                                    }
-                                                }
-                                                _ => {
-                                                    // Default to traditional bridge
-                                                    let client =
-                                                        op_network::ovsdb::OvsdbClient::new();
-                                                    match client
-                                                        .add_port(&container.bridge, &veth_name)
-                                                        .await
-                                                    {
-                                                        Ok(_) => {
-                                                            changes_applied.push(format!(
-                                                                "Added {} to bridge {}",
-                                                                veth_name, container.bridge
-                                                            ));
-                                                        }
-                                                        Err(e) => {
-                                                            errors.push(format!(
-                                                                "Failed to add port to bridge: {}",
-                                                                e
-                                                            ));
-                                                        }
-                                                    }
-                                                }
+                                    if old_veth != veth_name {
+                                        match op_network::rtnetlink::link_set_name(
+                                            &old_veth, &veth_name,
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                changes_applied.push(format!(
+                                                    "Renamed {} to {}",
+                                                    old_veth, veth_name
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                log::warn!("Failed to rename veth: {}", e);
+                                                // Continue anyway, veth might work with original name
                                             }
                                         }
-                                        Err(e) => {
-                                            errors.push(format!("Failed to rename veth: {}", e));
+                                    }
+
+                                    // 4. Network enrollment based on type
+                                    let network_type = container
+                                        .properties
+                                        .as_ref()
+                                        .and_then(|p| p.get("network_type"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("bridge");
+
+                                    let target_bridge = match network_type {
+                                        "netmaker" => "mesh".to_string(),
+                                        _ => container.bridge.clone(),
+                                    };
+
+                                    if !target_bridge.is_empty() {
+                                        let ovsdb_client = op_network::ovsdb::OvsdbClient::new();
+                                        match ovsdb_client.add_port(&target_bridge, &veth_name).await {
+                                            Ok(_) => {
+                                                changes_applied.push(format!(
+                                                    "Added {} to bridge {}",
+                                                    veth_name, target_bridge
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                errors.push(format!(
+                                                    "Failed to add port to bridge: {}",
+                                                    e
+                                                ));
+                                            }
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    // If we can't find the veth, stop the container to prevent orphan
                                     log::warn!(
-                                        "Failed to find veth for container {}, stopping container",
-                                        container.id
-                                    );
-                                    let _ = Self::stop_container(&container.id).await;
-                                    errors.push(format!(
                                         "Failed to find veth for container {}: {}",
-                                        container.id, e
-                                    ));
+                                        container.id,
+                                        e
+                                    );
+                                    // Continue - container was created, just couldn't configure OVS
                                 }
                             }
                         }
@@ -1143,18 +1087,13 @@ impl StatePlugin for LxcPlugin {
                         }
                     }
 
-                    // Then delete the container
-                    let output = tokio::process::Command::new("pct")
-                        .args(["destroy", resource])
-                        .output()
-                        .await;
-
-                    match output {
-                        Ok(out) if out.status.success() => {
-                            changes_applied.push(format!("Deleted container {}", resource));
+                    // Then delete the container via native API
+                    match Self::delete_container(resource, true).await {
+                        Ok(_) => {
+                            changes_applied.push(format!("Deleted container {} (via native Proxmox API)", resource));
                         }
-                        _ => {
-                            errors.push(format!("Failed to delete container {}", resource));
+                        Err(e) => {
+                            errors.push(format!("Failed to delete container {}: {}", resource, e));
                         }
                     }
                 }

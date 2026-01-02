@@ -6,6 +6,7 @@
 //! - Network plugin for OVS/OVSDB persistence
 //! - Socket networking support
 //! - Container networking with OpenFlow routing
+//! - Native Proxmox API client for LXC container management
 
 pub mod openflow;
 pub mod ovs_capabilities;
@@ -13,6 +14,7 @@ pub mod ovs_error;
 pub mod ovs_netlink;
 pub mod ovsdb;
 pub mod plugin;
+pub mod proxmox;
 pub mod rtnetlink;
 
 pub use openflow::{FlowAction, FlowEntry, FlowMatch, OpenFlowClient, OpenFlowVersion};
@@ -21,6 +23,7 @@ pub use ovs_error::OvsError;
 pub use ovs_netlink::{Datapath, KernelFlow, OvsNetlinkClient, Vport, VportConfig, VportType};
 pub use ovsdb::OvsdbClient;
 pub use plugin::{NetworkInterface, NetworkPlugin, OpenFlowConfig, OvsBridge, OvsdbConfig};
+pub use proxmox::{ProxmoxClient, ProxmoxToken, LxcContainer, CreateContainerRequest, ContainerStatus};
 
 /// Prelude for convenient imports
 pub mod prelude {
@@ -29,4 +32,5 @@ pub mod prelude {
     pub use super::ovs_netlink::{Datapath, OvsNetlinkClient, Vport};
     pub use super::ovsdb::OvsdbClient;
     pub use super::plugin::{NetworkInterface, NetworkPlugin, OvsBridge};
+    pub use super::proxmox::{ProxmoxClient, LxcContainer, CreateContainerRequest};
 }

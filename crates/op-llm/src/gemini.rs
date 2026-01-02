@@ -35,7 +35,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
 
-use crate::provider::{LlmProvider, ProviderType, ModelInfo, ChatMessage, ChatResponse, TokenUsage};
+use crate::provider::{LlmProvider, ProviderType, ModelInfo, ChatMessage, ChatResponse, ChatRequest, ToolDefinition, ToolCallInfo, ToolChoice, TokenUsage};
 
 // =============================================================================
 // API ENDPOINT CONFIGURATION
@@ -393,6 +393,7 @@ fn get_gemini_models() -> Vec<GeminiModel> {
 }
 
 /// Gemini API request
+/// Gemini API request with optional tools
 #[derive(Debug, Serialize)]
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
@@ -400,6 +401,37 @@ struct GeminiRequest {
     system_instruction: Option<GeminiContent>,
     #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
     generation_config: Option<GenerationConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<GeminiTool>>,
+    #[serde(rename = "toolConfig", skip_serializing_if = "Option::is_none")]
+    tool_config: Option<GeminiToolConfig>,
+}
+
+/// Gemini tool definition
+#[derive(Debug, Serialize)]
+struct GeminiTool {
+    #[serde(rename = "functionDeclarations")]
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+/// Gemini function declaration
+#[derive(Debug, Serialize)]
+struct GeminiFunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Gemini tool configuration
+#[derive(Debug, Serialize)]
+struct GeminiToolConfig {
+    #[serde(rename = "functionCallingConfig")]
+    function_calling_config: FunctionCallingConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct FunctionCallingConfig {
+    mode: String, // "AUTO", "ANY", "NONE"
 }
 
 #[derive(Debug, Serialize)]
@@ -458,6 +490,14 @@ struct GeminiContentResponse {
 #[derive(Debug, Deserialize)]
 struct GeminiPartResponse {
     text: Option<String>,
+    #[serde(rename = "functionCall")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -759,7 +799,7 @@ impl LlmProvider for GeminiClient {
             info!("🔀 Auto-routing enabled (BALANCED mode)");
         }
 
-        let request = GeminiRequest {
+        let gemini_req = GeminiRequest {
             contents,
             system_instruction,
             generation_config: Some(GenerationConfig {
@@ -768,6 +808,8 @@ impl LlmProvider for GeminiClient {
                 max_output_tokens: Some(8192),
                 routing_config,
             }),
+            tools: None,
+            tool_config: None,
         };
 
         debug!("Gemini request to: {}", url.split('?').next().unwrap_or(&url));
@@ -778,7 +820,7 @@ impl LlmProvider for GeminiClient {
 
         loop {
             // Build request with appropriate auth (regenerate token for each retry)
-            let mut req = self.client.post(&url).json(&request);
+            let mut req = self.client.post(&url).json(&gemini_req);
 
             if let Some(auth_header) = self.get_auth_header().await? {
                 req = req.header("Authorization", auth_header);
@@ -851,6 +893,202 @@ impl LlmProvider for GeminiClient {
         }
     }
     
+    async fn chat_with_request(&self, model: &str, request: ChatRequest) -> Result<ChatResponse> {
+        // Support "auto" model selection
+        let actual_model = if model == "auto" || model == "gemini-auto" {
+            let selected = self.select_auto_model(&request.messages);
+            info!("Auto model selection: {} -> {}", model, selected);
+            selected
+        } else {
+            model.to_string()
+        };
+
+        let url = self.build_url(&actual_model, "generateContent")?;
+
+        info!("Gemini chat_with_request: model={}, tools={}, mode={}",
+            actual_model,
+            request.tools.len(),
+            if self.use_vertex_ai { "Vertex AI" } else { "API Key" });
+
+        // Extract system message if present
+        let system_instruction = request.messages.iter()
+            .find(|m| m.role == "system")
+            .map(|m| GeminiContent {
+                role: "user".to_string(),
+                parts: vec![GeminiPart { text: m.content.clone() }],
+            });
+
+        // Build contents excluding system messages
+        let contents: Vec<GeminiContent> = request.messages.iter()
+            .filter(|m| m.role != "system")
+            .map(|m| GeminiContent {
+                role: if m.role == "assistant" { "model".to_string() } else { "user".to_string() },
+                parts: vec![GeminiPart { text: m.content.clone() }],
+            })
+            .collect();
+
+        // Convert tools to Gemini format
+        let tools = if request.tools.is_empty() {
+            None
+        } else {
+            let function_declarations: Vec<GeminiFunctionDeclaration> = request.tools.iter()
+                .map(|t| GeminiFunctionDeclaration {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                })
+                .collect();
+            
+            Some(vec![GeminiTool { function_declarations }])
+        };
+
+        // Convert tool_choice to Gemini format
+        let tool_config = if !request.tools.is_empty() {
+            let mode = match request.tool_choice {
+                ToolChoice::Auto => "AUTO",
+                ToolChoice::None => "NONE",
+                ToolChoice::Required => "ANY",
+                ToolChoice::Tool(_) => "ANY", // Gemini doesn't support specific tool selection
+            };
+            Some(GeminiToolConfig {
+                function_calling_config: FunctionCallingConfig {
+                    mode: mode.to_string(),
+                },
+            })
+        } else {
+            None
+        };
+
+        // Enable auto-routing for Gemini 3 models
+        let use_auto_routing = actual_model.starts_with("gemini-3");
+        let routing_config = if use_auto_routing {
+            Some(RoutingConfig {
+                auto_mode: Some(AutoRoutingMode {
+                    model_routing_preference: "BALANCED".to_string(),
+                }),
+            })
+        } else {
+            None
+        };
+
+        if use_auto_routing {
+            info!("🔀 Auto-routing enabled (BALANCED mode)");
+        }
+
+        let gemini_request = GeminiRequest {
+            contents,
+            system_instruction,
+            generation_config: Some(GenerationConfig {
+                temperature: request.temperature,
+                top_p: request.top_p,
+                max_output_tokens: request.max_tokens.map(|t| t as u32),
+                routing_config,
+            }),
+            tools,
+            tool_config,
+        };
+
+        debug!("Gemini request to: {}", url.split('?').next().unwrap_or(&url));
+
+        // Retry with exponential backoff for rate limiting (429) errors
+        let max_retries = 5;
+        let mut retry_count = 0;
+
+        loop {
+            // Build request with appropriate auth
+            let mut req = self.client.post(&url).json(&gemini_request);
+
+            if let Some(auth_header) = self.get_auth_header().await? {
+                req = req.header("Authorization", auth_header);
+            }
+
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Gemini HTTP request failed: {}", e);
+                    return Err(anyhow::anyhow!("Failed to send Gemini request: {}", e));
+                }
+            };
+
+            let status = response.status();
+
+            // Handle 429 rate limit
+            if status.as_u16() == 429 {
+                if retry_count >= max_retries {
+                    let body = response.text().await.unwrap_or_default();
+                    tracing::error!("Gemini API rate limit exceeded after {} retries: {}", max_retries, body);
+                    return Err(anyhow::anyhow!("Gemini API rate limit exceeded"));
+                }
+
+                let delay_secs = 1u64 << retry_count;
+                tracing::warn!("Gemini API rate limit (429), retrying in {}s", delay_secs);
+                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                retry_count += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                tracing::error!("Gemini API error {}: {}", status, body);
+                return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
+            }
+
+            // Parse response
+            let result: GeminiResponse = response.json().await
+                .context("Failed to parse Gemini response")?;
+
+            // Extract text and function calls
+            let mut text = String::new();
+            let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+
+            if let Some(candidate) = result.candidates.first() {
+                for part in &candidate.content.parts {
+                    if let Some(ref t) = part.text {
+                        text.push_str(t);
+                    }
+                    if let Some(ref fc) = part.function_call {
+                        tool_calls.push(ToolCallInfo {
+                            id: format!("call_{}", tool_calls.len()),
+                            name: fc.name.clone(),
+                            arguments: fc.args.clone(),
+                        });
+                    }
+                }
+            }
+
+            let finish_reason = result.candidates.first()
+                .and_then(|c| c.finish_reason.clone());
+
+            let usage = result.usage_metadata.map(|u| TokenUsage {
+                prompt_tokens: u.prompt_token_count.unwrap_or(0),
+                completion_tokens: u.candidates_token_count.unwrap_or(0),
+                total_tokens: u.total_token_count.unwrap_or(0),
+            });
+
+            // Log tool calls if any
+            if !tool_calls.is_empty() {
+                info!("Gemini returned {} tool calls", tool_calls.len());
+                for tc in &tool_calls {
+                    debug!("  Tool call: {}({})", tc.name, tc.arguments);
+                }
+            }
+
+            return Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".to_string(),
+                    content: text,
+                    tool_calls: None, // We put them in the response.tool_calls field
+                    tool_call_id: None,
+                },
+                model: model.to_string(),
+                provider: "gemini".to_string(),
+                finish_reason,
+                usage,
+                tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            });
+        }
+    }
+
     async fn chat_stream(&self, model: &str, messages: Vec<ChatMessage>) -> Result<tokio::sync::mpsc::Receiver<Result<String>>> {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         let response = self.chat(model, messages).await?;

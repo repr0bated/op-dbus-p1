@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "op-dbus-sysadmin": {
+      "command": "curl",
+      "args": ["-X", "POST", "-H", "Content-Type: application/json", "-d", "@-", "http://localhost:8081/mcp/profile/sysadmin"],
+      "description": "System administration (shell, systemd, process)"
+    },
+    "op-dbus-network": {
+      "command": "curl",
+      "args": ["-X", "POST", "-H", "Content-Type: application/json", "-d", "@-", "http://localhost:8081/mcp/profile/network"],
+      "description": "Network tools (OVS, rtnetlink, bridge)"
+    },
+    "op-dbus-containers": {
+      "command": "curl",
+      "args": ["-X", "POST", "-H", "Content-Type: application/json", "-d", "@-", "http://localhost:8081/mcp/profile/containers"],
+      "description": "Container management (LXC, Docker)"
+    },
+    "op-dbus-antigravity": {
+      "command": "curl",
+      "args": ["-X", "POST", "-H", "Content-Type: application/json", "-d", "@-", "http://localhost:8081/mcp/profile/antigravity"],
+      "description": "All agents - excludes direct server config"
+    },
+    "op-dbus-rust-dev": {
+      "command": "curl",
+      "args": ["-X", "POST", "-H", "Content-Type: application/json", "-d", "@-", "http://localhost:8081/mcp/profile/rust-dev"],
+      "description": "Rust development (shell, file, cargo)"
+    }
+  }
+}

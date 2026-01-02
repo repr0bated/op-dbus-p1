@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "op-dbus-antigravity": {
+      "serverUrl": "http://localhost:8081/mcp/profile/antigravity",
+      "transport": "sse",
+      "description": "All agents - excludes direct server config (OVS, LXC, D-Bus, systemd)"
+    }
+  }
+}

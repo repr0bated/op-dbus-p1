@@ -111,6 +111,38 @@ pub struct LlmSwitchResponse {
     pub note: Option<String>,
 }
 
+/// Privacy signup request
+#[derive(Debug, Clone, Serialize)]
+pub struct PrivacySignupRequest {
+    pub email: String,
+}
+
+/// Privacy signup response
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrivacySignupResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Privacy verify response
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrivacyVerifyResponse {
+    pub success: bool,
+    pub user_id: Option<String>,
+    pub config: Option<String>,
+    pub qr_code: Option<String>,
+    pub message: String,
+}
+
+/// Privacy status response
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrivacyStatusResponse {
+    pub available: bool,
+    pub server_public_key: Option<String>,
+    pub endpoint: Option<String>,
+    pub registered_users: usize,
+}
+
 /// API client
 pub struct ApiClient {
     base_url: String,
@@ -338,6 +370,64 @@ impl ApiClient {
 
         response
             .json::<LlmSwitchResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    /// Privacy router signup
+    pub async fn privacy_signup(&self, email: &str) -> Result<PrivacySignupResponse, String> {
+        let request = PrivacySignupRequest {
+            email: email.to_string(),
+        };
+
+        let response = Request::post(&format!("{}/api/privacy/signup", self.base_url))
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .map_err(|e| format!("Failed to serialize request: {}", e))?
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.ok() {
+            return Err(format!("HTTP error: {}", response.status()));
+        }
+
+        response
+            .json::<PrivacySignupResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    /// Privacy router verify magic link
+    pub async fn privacy_verify(&self, token: &str) -> Result<PrivacyVerifyResponse, String> {
+        let response = Request::get(&format!("{}/api/privacy/verify?token={}", self.base_url, token))
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.ok() {
+            return Err(format!("HTTP error: {}", response.status()));
+        }
+
+        response
+            .json::<PrivacyVerifyResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))
+    }
+
+    /// Privacy router status
+    pub async fn privacy_status(&self) -> Result<PrivacyStatusResponse, String> {
+        let response = Request::get(&format!("{}/api/privacy/status", self.base_url))
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+
+        if !response.ok() {
+            return Err(format!("HTTP error: {}", response.status()));
+        }
+
+        response
+            .json::<PrivacyStatusResponse>()
             .await
             .map_err(|e| format!("Failed to parse response: {}", e))
     }

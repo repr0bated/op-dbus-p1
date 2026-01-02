@@ -17,7 +17,7 @@ pub struct RtnetlinkListInterfacesTool;
 #[async_trait]
 impl Tool for RtnetlinkListInterfacesTool {
     fn name(&self) -> &str {
-        "rtnetlink_list_interfaces"
+        "list_network_interfaces"
     }
 
     fn description(&self) -> &str {
@@ -46,10 +46,10 @@ impl Tool for RtnetlinkListInterfacesTool {
         vec!["rtnetlink".to_string(), "network".to_string(), "interfaces".to_string()]
     }
 
-    async fn execute(&self, args: Value) -> Result<Value> {
+    async fn execute(&self, input: Value) -> Result<Value> {
         info!("Listing network interfaces via rtnetlink");
 
-        let filter_state = args.get("filter_state").and_then(|v| v.as_str());
+        let filter_state = input.get("filter_state").and_then(|v| v.as_str());
 
         match op_network::rtnetlink::list_interfaces().await {
             Ok(mut interfaces) => {
@@ -137,7 +137,7 @@ impl Tool for RtnetlinkGetDefaultRouteTool {
         vec!["rtnetlink".to_string(), "network".to_string(), "route".to_string()]
     }
 
-    async fn execute(&self, _args: Value) -> Result<Value> {
+    async fn execute(&self, _input: Value) -> Result<Value> {
         info!("Getting default route via rtnetlink");
 
         match op_network::rtnetlink::get_default_route().await {
@@ -198,21 +198,21 @@ impl Tool for RtnetlinkAddAddressTool {
         vec!["rtnetlink".to_string(), "network".to_string(), "address".to_string()]
     }
 
-    async fn execute(&self, args: Value) -> Result<Value> {
+    async fn execute(&self, input: Value) -> Result<Value> {
         // Accept both "interface" and "iface" for compatibility
-        let interface = args
+        let interface = input
             .get("interface")
-            .or_else(|| args.get("iface"))
+            .or_else(|| input.get("iface"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: interface"))?;
-        let address = args
+        let address = input
             .get("address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: address"))?;
         // Accept both "prefix_len" and "prefix" for compatibility
-        let prefix_len = args
+        let prefix_len = input
             .get("prefix_len")
-            .or_else(|| args.get("prefix"))
+            .or_else(|| input.get("prefix"))
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: prefix_len"))? as u8;
 
@@ -269,8 +269,8 @@ impl Tool for RtnetlinkLinkUpTool {
         vec!["rtnetlink".to_string(), "network".to_string(), "link".to_string()]
     }
 
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let interface = args
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let interface = input
             .get("interface")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: interface"))?;
@@ -324,8 +324,8 @@ impl Tool for RtnetlinkLinkDownTool {
         vec!["rtnetlink".to_string(), "network".to_string(), "link".to_string()]
     }
 
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let interface = args
+    async fn execute(&self, input: Value) -> Result<Value> {
+        let interface = input
             .get("interface")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: interface"))?;
@@ -357,4 +357,3 @@ pub async fn register_rtnetlink_tools(
     info!("Registered 5 rtnetlink tools");
     Ok(())
 }
-

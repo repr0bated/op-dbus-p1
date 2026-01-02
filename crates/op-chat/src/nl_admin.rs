@@ -206,14 +206,14 @@ impl ToolCallParser {
                 
                 if let Ok(arguments) = serde_json::from_str::<Value>(args_str) {
                     info!("Extracted tool call: {}", tool_name);
-                        calls.push(ExtractedToolCall {
-                            name: tool_name,
-                            arguments,
-                            source: ToolCallSource::JsonInText,
-                        });
-                    }
+                    calls.push(ExtractedToolCall {
+                        name: tool_name,
+                        arguments,
+                        source: ToolCallSource::JsonInText,
+                    });
                 }
             }
+        }
         calls
     }
 
@@ -572,15 +572,15 @@ impl NLAdminOrchestrator {
                     if let Some(obj) = data.as_object() {
                         let key_count = obj.keys().filter(|k| *k != "_internal").count();
                         response.push_str(&format!("({} fields)", key_count));
-                            }
-                        }
+                    }
+                }
                 response.push('\n');
             } else {
                 response.push_str(&format!("❌ **{}** failed", result.tool_name));
                 if let Some(ref err) = result.error {
                     response.push_str(&format!(": {}", err));
-            }
-            response.push('\n');
+                }
+                response.push('\n');
             }
         }
 
@@ -621,6 +621,7 @@ impl NLAdminOrchestrator {
 }
 
 /// Format a JSON value for display
+#[allow(dead_code)]
 fn format_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),

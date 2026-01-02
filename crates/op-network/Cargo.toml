@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Native networking: OpenFlow (all versions, pure Rust), OVSDB JSON-RPC, rtnetlink, container networking"
+description = "Native networking: OpenFlow (all versions, pure Rust), OVSDB JSON-RPC, rtnetlink, Proxmox API, container networking"
 
 [dependencies]
 tokio = { workspace = true }
@@ -17,6 +17,9 @@ async-trait = { workspace = true }
 futures = "0.3"
 rtnetlink = { workspace = true }
 log = { workspace = true }
+
+# HTTP client for Proxmox API
+reqwest = { workspace = true }
 
 # Netlink (Generic Netlink for OVS)
 netlink-sys = "0.8"

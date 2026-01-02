@@ -14,6 +14,7 @@ use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+mod email;
 mod handlers;
 mod mcp;
 mod mcp_picker;
@@ -22,7 +23,9 @@ mod orchestrator;
 mod routes;
 mod sse;
 mod state;
+mod users;
 mod websocket;
+mod wireguard;
 
 use routes::create_router;
 use state::AppState;
@@ -77,29 +80,39 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+    let domain = std::env::var("DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+    let public_url = if domain == "localhost" {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("https://{}", domain)
+    };
 
     println!(r#"
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Server Ready                            │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  🌐 Web UI:        http://localhost:{:<5}                      │
-│  📡 REST API:      http://localhost:{:<5}/api/                 │
-│  💬 WebSocket:     ws://localhost:{:<5}/ws                     │
-│  📊 Health:        http://localhost:{:<5}/api/health           │
+│  🌐 Public URL:    {:<45} │
+│  🏠 Local Web UI:  http://localhost:{:<5}                      │
+│  📡 REST API:      {}/api/                                      │
+│  💬 WebSocket:     {}/ws                                        │
+│  📊 Health:        {}/api/health                                │
 │                                                                 │
-│  🔧 MCP Tool Picker:                                            │
-│     http://localhost:{:<5}/mcp-picker                          │
+│  🔧 MCP Endpoints (Choose One):                                 │
+│     Full (All):  /mcp                                           │
+│     Profile:     /mcp/profile/{{name}}                           │
+│     Custom:      /mcp/custom/{{name}}                            │
 │                                                                 │
-│  📋 MCP Endpoints:                                              │
-│     Profiles:  /mcp/profiles                                    │
-│     Custom:    /mcp/custom/{{name}}                               │
-│     Discover:  /mcp/_discover                                   │
+│  📋 Discovery:                                                  │
+│     Profiles:    /mcp/profiles                                  │
+│     Config:      /mcp/_config                                   │
+│     Discover:    /mcp/_discover                                 │
 │                                                                 │
 │  Press Ctrl+C to stop                                           │
 └─────────────────────────────────────────────────────────────────┘
-"#, port, port, port, port, port);
+"#, public_url, port, public_url, public_url.replace("https://", "wss://").replace("http://", "ws://"), public_url);
 
     // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(addr).await?;

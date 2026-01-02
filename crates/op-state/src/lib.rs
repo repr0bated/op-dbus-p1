@@ -6,6 +6,7 @@
 //! - Crypto utilities for state hashing/signing
 //! - Schema validation
 //! - Plugin tree for hierarchical state
+//! - Persistent storage via op-state-store
 //! - Auto-plugin generation
 
 pub mod authority;
@@ -25,6 +26,12 @@ pub use plugin::{
 };
 pub use plugtree::PlugTree;
 
+// Re-export state store types
+pub use op_state_store::{
+    ExecutionJob, ExecutionResult, ExecutionStatus, PluginSchema, SchemaRegistry, SqliteStore,
+    StateStore, StateStoreError,
+};
+
 /// Prelude for convenient imports
 pub mod prelude {
     pub use super::manager::StateManager;
@@ -33,4 +40,8 @@ pub mod prelude {
         StatePlugin,
     };
     pub use super::plugtree::PlugTree;
+    // State store types
+    pub use op_state_store::{
+        ExecutionJob, ExecutionStatus, PluginSchema, SchemaRegistry, SqliteStore, StateStore,
+    };
 }

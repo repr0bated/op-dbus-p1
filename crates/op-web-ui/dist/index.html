@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>op-dbus Admin</title>
+    <link rel="stylesheet" href="/styles-795844e3c90cb6a6.css" integrity="sha384-px6HJKfZiEg3GndnsQprefYvkqMS0YuPLIuQSDtoujEAUk2YpcDsSnWXmV324Q5U"/>
+<link rel="modulepreload" href="/op-web-ui-e22b23b2aa6778b7.js" crossorigin="anonymous" integrity="sha384-WLLNI392/2oT/h5epuusfDW/EE4FihxEZ18avzq/r9J8eJB7nXUgsq+CoWs+HGrK"><link rel="preload" href="/op-web-ui-e22b23b2aa6778b7_bg.wasm" crossorigin="anonymous" integrity="sha384-yAA190QHOn64VsP1bgaWAlRIsADRw0NfbPxkYRal0aRviELR2EO58qQpR+ErxK6/" as="fetch" type="application/wasm"></head>
+<body>
+    <!-- Leptos will mount here -->
+
+<script type="module">
+import init, * as bindings from '/op-web-ui-e22b23b2aa6778b7.js';
+const wasm = await init({ module_or_path: '/op-web-ui-e22b23b2aa6778b7_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script></body>
+</html>

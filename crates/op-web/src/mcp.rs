@@ -22,19 +22,56 @@
 use axum::{
     extract::{Path, State},
     response::Json,
+    response::sse::{Event, Sse},
     routing::{get, post},
     Router,
 };
+use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tracing::{info, debug, warn};
 
 use crate::state::AppState;
 
 /// Maximum tools per profile (must stay under Cursor's 40 limit)
 pub const MAX_TOOLS_PER_PROFILE: usize = 35;
+
+/// SSE broadcaster for MCP responses
+#[derive(Clone)]
+pub struct SseBroadcaster {
+    tx: broadcast::Sender<String>,
+}
+
+impl SseBroadcaster {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(100);
+        Self { tx }
+    }
+
+    pub fn broadcast(&self, data: &str) {
+        let _ = self.tx.send(data.to_string());
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.tx.subscribe()
+    }
+}
+
+/// Global SSE broadcasters for each profile
+lazy_static::lazy_static! {
+    static ref PROFILE_BROADCASTERS: std::sync::Mutex<HashMap<String, SseBroadcaster>> = std::sync::Mutex::new(HashMap::new());
+}
+
+fn get_profile_broadcaster(profile: &str) -> SseBroadcaster {
+    let mut broadcasters = PROFILE_BROADCASTERS.lock().unwrap();
+    broadcasters.entry(profile.to_string()).or_insert_with(SseBroadcaster::new).clone()
+}
 
 /// Tool profiles - each is a curated subset under 35 tools
 /// Format: (profile_name, description, included_tool_prefixes)
@@ -103,6 +140,55 @@ pub const PROFILES: &[(&str, &str, &[&str])] = &[
         "self_", "file_", "shell_exec",
         "respond_", "request_", "cannot_",
     ]),
+
+    // Antigravity profile (all agents, excludes only direct server config tools)
+    ("antigravity", "All agents - excludes direct server config (OVS, LXC, D-Bus, systemd)", &[
+        // Core tools
+        "file_", "shell_exec", "shell_run",
+        "respond_", "request_", "cannot_",
+        // Language agents (ALL included)
+        "agent_bash", "agent_c", "agent_cpp", "agent_csharp", "agent_elixir",
+        "agent_golang", "agent_java", "agent_javascript", "agent_julia",
+        "agent_php", "agent_python", "agent_ruby", "agent_rust",
+        "agent_scala", "agent_typescript",
+        // Architecture agents
+        "agent_backend_architect", "agent_frontend_developer", "agent_graphql_architect",
+        // Infrastructure agents (NOW INCLUDED)
+        "agent_cloud_architect", "agent_deployment", "agent_kubernetes",
+        "agent_network_engineer", "agent_terraform", "agent_devops_troubleshooter",
+        "agent_incident_responder", "agent_database_architect", "agent_database_optimizer",
+        // Analysis agents
+        "agent_code_reviewer", "agent_debugger", "agent_performance_engineer",
+        "agent_security_auditor", "agent_error_detective",
+        // Business agents
+        "agent_business_analyst", "agent_customer_support", "agent_hr",
+        "agent_legal_advisor", "agent_payment_integration", "agent_sales_automator",
+        // Content agents
+        "agent_api_documenter", "agent_docs_architect", "agent_mermaid_expert",
+        "agent_tutorial_engineer", "agent_content_marketer", "agent_search_specialist",
+        "agent_seo_content_writer", "agent_seo_keyword_strategist", "agent_seo_meta_optimizer",
+        // Database agents
+        "agent_sql",
+        // Operations agents
+        "agent_test_automator",
+        // Orchestration agents
+        "agent_context_manager", "agent_dx_optimizer", "agent_tdd_orchestrator",
+        // Security agents (code-focused)
+        "agent_backend_security_coder", "agent_frontend_security_coder", "agent_mobile_security_coder",
+        // Specialty agents
+        "agent_arm_cortex_expert", "agent_blockchain_developer", "agent_hybrid_cloud_architect",
+        "agent_legacy_modernizer", "agent_observability_engineer", "agent_quant_analyst",
+        "agent_ui_ux_designer", "agent_unity_developer",
+        // AI/ML agents
+        "agent_ai_engineer", "agent_data_engineer", "agent_data_scientist",
+        "agent_ml_engineer", "agent_mlops_engineer", "agent_prompt_engineer",
+        // Web frameworks
+        "agent_django", "agent_fastapi", "agent_temporal_python",
+        // Mobile
+        "agent_flutter_expert", "agent_ios_developer", "agent_mobile_developer",
+        // EXCLUDED: Direct server config tools only
+        // "ovs_", "lxc_", "dbus_", "systemd_", "bridge_", "netlink_", "package_"
+    ]),
 ];
 
 /// Core tools that are ALWAYS included in every profile
@@ -168,15 +254,21 @@ impl McpResponse {
 pub fn create_mcp_router(state: Arc<AppState>) -> Router {
     Router::new()
         // Profile-based endpoints (USE THESE!)
-        .route("/profile/:profile", post(mcp_handler_profile))
+        .route("/profile/:profile", get(mcp_sse_handler).post(mcp_message_handler))
+        .route("/profile/:profile/sse", get(mcp_sse_handler))
+        .route("/profile/:profile/message", post(mcp_message_handler))
         // Custom user-defined profiles (from web UI)
         .route("/custom/:profile", post(mcp_handler_custom_profile))
+        .route("/custom/:profile/sse", get(mcp_custom_sse_handler))
+        .route("/custom/:profile/message", post(mcp_custom_message_handler))
         // Discovery
         .route("/profiles", get(profiles_handler))
         .route("/_discover", get(discover_handler))
         .route("/_config", get(config_handler))
         // Legacy endpoints (may hit limits - warns in logs)
         .route("/", post(mcp_handler_all))
+        .route("/sse", get(mcp_sse_handler_legacy))
+        .route("/message", post(mcp_message_handler_legacy))
         .with_state(state)
 }
 
@@ -705,38 +797,48 @@ pub async fn config_handler(
     State(_state): State<Arc<AppState>>,
 ) -> Json<Value> {
     let base_url = "https://xray.ghostbridge.tech";
-    
+
     Json(json!({
         "mcpServers": {
             "op-dbus-shell": {
-                "serverUrl": format!("{}/mcp/shell", base_url),
+                "serverUrl": format!("{}/mcp/profile/shell", base_url),
                 "transport": "sse",
                 "description": "Shell and system command tools"
             },
             "op-dbus-dbus": {
-                "serverUrl": format!("{}/mcp/dbus", base_url),
+                "serverUrl": format!("{}/mcp/profile/dbus", base_url),
                 "transport": "sse",
                 "description": "D-Bus protocol tools (systemd, introspection)"
             },
             "op-dbus-network": {
-                "serverUrl": format!("{}/mcp/network", base_url),
+                "serverUrl": format!("{}/mcp/profile/network", base_url),
                 "transport": "sse",
                 "description": "Network tools (OVS, rtnetlink, bridge)"
             },
             "op-dbus-file": {
-                "serverUrl": format!("{}/mcp/file", base_url),
+                "serverUrl": format!("{}/mcp/profile/file", base_url),
                 "transport": "sse",
                 "description": "Filesystem tools (read, write, list)"
             },
             "op-dbus-agent": {
-                "serverUrl": format!("{}/mcp/agent", base_url),
+                "serverUrl": format!("{}/mcp/profile/agent", base_url),
                 "transport": "sse",
                 "description": "Agent execution tools"
             },
             "op-dbus-chat": {
-                "serverUrl": format!("{}/mcp/chat", base_url),
+                "serverUrl": format!("{}/mcp/profile/chat", base_url),
                 "transport": "sse",
                 "description": "Chat and response tools"
+            },
+            "op-dbus-sysadmin": {
+                "serverUrl": format!("{}/mcp/profile/sysadmin", base_url),
+                "transport": "sse",
+                "description": "System administration (shell, systemd, process)"
+            },
+            "op-dbus-containers": {
+                "serverUrl": format!("{}/mcp/profile/containers", base_url),
+                "transport": "sse",
+                "description": "Container management (LXC, Docker)"
             }
         }
     }))
@@ -755,6 +857,216 @@ pub async fn claude_config_handler(
             }
         }
     }))
+}
+
+// SSE handlers for profile-based MCP connections
+
+/// SSE endpoint for profile-based MCP connections
+async fn mcp_sse_handler(
+    Path(profile_name): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let broadcaster = get_profile_broadcaster(&profile_name);
+    let rx = broadcaster.subscribe();
+
+    info!("SSE client connected for profile: {}", profile_name);
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(data) => Some(Ok(Event::default().data(data))),
+            Err(_) => None, // Skip lagged messages
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+/// Message handler for profile-based MCP requests (with SSE broadcasting)
+async fn mcp_message_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_name): Path<String>,
+    Json(request): Json<McpRequest>,
+) -> Json<McpResponse> {
+    info!("MCP message received for profile: {} (method: {})", profile_name, request.method);
+
+    // Get profile filter
+    let profile = PROFILES.iter().find(|(name, _, _)| *name == profile_name);
+    let prefixes = match profile {
+        Some((_, _, prefixes)) => prefixes.to_vec(),
+        None => {
+            warn!("Unknown profile in message handler: {}", profile_name);
+            return Json(McpResponse::error(
+                request.id,
+                -32602,
+                format!("Unknown profile: {}", profile_name),
+            ));
+        }
+    };
+
+    let filter = move |tool_name: &str| {
+        prefixes.iter().any(|p| tool_name.starts_with(p))
+    };
+
+    // Handle the request
+    let response = mcp_handler_filtered_inner(&state, request, filter, &profile_name, Some(MAX_TOOLS_PER_PROFILE)).await;
+
+    // Broadcast to SSE clients
+    if let Ok(json) = serde_json::to_string(&response) {
+        let broadcaster = get_profile_broadcaster(&profile_name);
+        broadcaster.broadcast(&json);
+    }
+
+    Json(response)
+}
+
+/// SSE endpoint for custom profile-based MCP connections
+async fn mcp_custom_sse_handler(
+    Path(profile_name): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let broadcaster = get_profile_broadcaster(&format!("custom-{}", profile_name));
+    let rx = broadcaster.subscribe();
+
+    info!("SSE client connected for custom profile: {}", profile_name);
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(data) => Some(Ok(Event::default().data(data))),
+            Err(_) => None, // Skip lagged messages
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+/// Message handler for custom profile-based MCP requests (with SSE broadcasting)
+async fn mcp_custom_message_handler(
+    State(state): State<Arc<AppState>>,
+    Path(profile_name): Path<String>,
+    Json(request): Json<McpRequest>,
+) -> Json<McpResponse> {
+    info!("MCP custom message received for profile: {} (method: {})", profile_name, request.method);
+
+    use crate::mcp_picker::CUSTOM_PROFILES;
+
+    // Load the custom profile
+    let selected_tools: std::collections::HashSet<String> = match CUSTOM_PROFILES.get_profile(&profile_name).await {
+        Some(tools) => tools,
+        None => {
+            warn!("Unknown custom MCP profile: {}", profile_name);
+            return Json(McpResponse::error(
+                request.id,
+                -32602,
+                format!("Custom profile '{}' not found", profile_name),
+            ));
+        }
+    };
+
+    let filter = move |tool_name: &str| selected_tools.contains(tool_name);
+
+    // Handle the request
+    let custom_profile_name = format!("custom-{}", profile_name);
+    let response = mcp_handler_filtered_inner(&state, request, filter, &custom_profile_name, Some(MAX_TOOLS_PER_PROFILE)).await;
+
+    // Broadcast to SSE clients
+    if let Ok(json) = serde_json::to_string(&response) {
+        let broadcaster = get_profile_broadcaster(&custom_profile_name);
+        broadcaster.broadcast(&json);
+    }
+
+    Json(response)
+}
+
+/// Legacy SSE handlers (for backward compatibility)
+
+/// SSE endpoint for legacy MCP connections
+async fn mcp_sse_handler_legacy() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let broadcaster = get_profile_broadcaster("legacy");
+    let rx = broadcaster.subscribe();
+
+    info!("SSE client connected (legacy endpoint)");
+
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(data) => Some(Ok(Event::default().data(data))),
+            Err(_) => None, // Skip lagged messages
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+/// Message handler for legacy MCP requests (with SSE broadcasting)
+async fn mcp_message_handler_legacy(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<McpRequest>,
+) -> Json<McpResponse> {
+    info!("MCP legacy message received (method: {})", request.method);
+
+    warn!("Using legacy MCP endpoint - may exceed tool limits. Use profile endpoints instead.");
+
+    let filter = |_: &str| true;
+    let response = mcp_handler_filtered_inner(&state, request, filter, "legacy", None).await;
+
+    // Broadcast to SSE clients
+    if let Ok(json) = serde_json::to_string(&response) {
+        let broadcaster = get_profile_broadcaster("legacy");
+        broadcaster.broadcast(&json);
+    }
+
+    Json(response)
+}
+
+/// Helper function for handling filtered MCP requests
+async fn mcp_handler_filtered_inner<F>(
+    state: &AppState,
+    request: McpRequest,
+    tool_filter: F,
+    server_name: &str,
+    max_tools: Option<usize>,
+) -> McpResponse
+where
+    F: Fn(&str) -> bool,
+{
+    debug!("MCP request ({} server): {} (id: {:?})", server_name, request.method, request.id);
+
+    // Validate JSON-RPC version
+    if request.jsonrpc != "2.0" {
+        return McpResponse::error(
+            request.id,
+            -32600,
+            "Invalid JSON-RPC version",
+        );
+    }
+
+    let response = match request.method.as_str() {
+        "initialize" => handle_initialize(request.id, server_name).await,
+        "initialized" => handle_initialized(request.id).await,
+        "tools/list" => handle_tools_list(state, request.id, &tool_filter, request.params.clone(), max_tools).await,
+        "tools/describe" => handle_tools_describe(state, request.id, request.params).await,
+        "tools/call" => handle_tools_call(state, request.id, request.params).await,
+        "resources/list" => handle_resources_list(request.id).await,
+        "resources/read" => handle_resources_read(request.id, request.params).await,
+        "prompts/list" => handle_prompts_list(request.id).await,
+        "ping" => handle_ping(request.id).await,
+        _ => McpResponse::error(
+            request.id,
+            -32601,
+            format!("Method not found: {}", request.method),
+        ),
+    };
+
+    response
 }
 
 // Legacy handler for backward compatibility

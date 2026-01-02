@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "op-dbus-antigravity": {
+      "serverUrl": "http://127.0.0.1:8080/mcp/profile/antigravity",
+      "description": "Complete op-dbus MCP server with all agents (excludes direct server config)"
+    }
+  }
+}

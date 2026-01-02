@@ -3,6 +3,7 @@
 //! Main page views for the application.
 
 use leptos::*;
+use wasm_bindgen::JsCast;
 use crate::api::*;
 use crate::components::*;
 use crate::state::*;
@@ -725,6 +726,235 @@ pub fn ModelsPage() -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
+        </div>
+    }
+}
+
+/// Privacy Router signup page
+#[component]
+pub fn PrivacyPage() -> impl IntoView {
+    let (loading, set_loading) = create_signal(false);
+    let (error, set_error) = create_signal::<Option<String>>(None);
+    let (email, set_email) = create_signal(String::new());
+    let (submitted, set_submitted) = create_signal(false);
+    let (success_message, set_success_message) = create_signal::<Option<String>>(None);
+
+    // Check for token in URL (magic link verification)
+    let (verifying, set_verifying) = create_signal(false);
+    let (verify_result, set_verify_result) = create_signal::<Option<PrivacyVerifyResponse>>(None);
+
+    // Check URL for token on mount
+    create_effect(move |_| {
+        if let Some(window) = web_sys::window() {
+            if let Ok(search) = window.location().search() {
+                if search.contains("token=") {
+                    let token = search
+                        .split("token=")
+                        .nth(1)
+                        .unwrap_or("")
+                        .split('&')
+                        .next()
+                        .unwrap_or("");
+
+                    if !token.is_empty() {
+                        set_verifying.set(true);
+                        let token = token.to_string();
+                        spawn_local(async move {
+                            let client = ApiClient::default();
+                            match client.privacy_verify(&token).await {
+                                Ok(result) => {
+                                    set_verify_result.set(Some(result));
+                                }
+                                Err(e) => {
+                                    set_error.set(Some(e));
+                                }
+                            }
+                            set_verifying.set(false);
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    let handle_submit = move |ev: web_sys::SubmitEvent| {
+        ev.prevent_default();
+        let email_value = email.get();
+
+        if email_value.trim().is_empty() {
+            set_error.set(Some("Please enter your email address".to_string()));
+            return;
+        }
+
+        set_loading.set(true);
+        set_error.set(None);
+
+        spawn_local(async move {
+            let client = ApiClient::default();
+            match client.privacy_signup(&email_value).await {
+                Ok(response) => {
+                    if response.success {
+                        set_submitted.set(true);
+                        set_success_message.set(Some(response.message));
+                    } else {
+                        set_error.set(Some(response.message));
+                    }
+                }
+                Err(e) => {
+                    set_error.set(Some(e));
+                }
+            }
+            set_loading.set(false);
+        });
+    };
+
+    let download_config = move |config: String| {
+        if let Some(window) = web_sys::window() {
+            if let Some(document) = window.document() {
+                let element = document.create_element("a").unwrap();
+                let blob = web_sys::Blob::new_with_str_sequence(&js_sys::Array::of1(&config.into())).unwrap();
+                let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
+                element.set_attribute("href", &url).unwrap();
+                element.set_attribute("download", "privacy-router.conf").unwrap();
+                let html_element: web_sys::HtmlElement = element.unchecked_into();
+                html_element.click();
+            }
+        }
+    };
+
+    view! {
+        <div class="privacy-page">
+            <div class="privacy-header">
+                <h2>"Privacy Router"</h2>
+                <p class="privacy-subtitle">"Secure VPN access with WireGuard"</p>
+            </div>
+
+            {move || error.get().map(|e| view! { <ErrorDisplay message=e/> })}
+
+            // Show verification result if we have a token
+            {move || verifying.get().then(|| view! {
+                <div class="verifying-container">
+                    <LoadingSpinner/>
+                    <p>"Verifying your access..."</p>
+                </div>
+            })}
+
+            // Show config download if verified
+            {move || verify_result.get().map(|result| {
+                if result.success {
+                    let config = result.config.clone().unwrap_or_default();
+                    let config_for_download = config.clone();
+                    view! {
+                        <div class="config-container">
+                            <div class="success-badge">"Access Verified"</div>
+                            <p class="welcome-message">{result.message}</p>
+
+                            // QR Code
+                            {result.qr_code.clone().map(|qr| view! {
+                                <div class="qr-container">
+                                    <h3>"Scan with WireGuard App"</h3>
+                                    <img src=qr alt="WireGuard QR Code" class="qr-code"/>
+                                    <p class="qr-hint">"Open WireGuard on your phone and scan this QR code"</p>
+                                </div>
+                            })}
+
+                            // Config download
+                            <div class="config-download">
+                                <h3>"Or Download Config File"</h3>
+                                <button
+                                    class="download-button"
+                                    on:click=move |_| download_config(config_for_download.clone())
+                                >
+                                    "Download privacy-router.conf"
+                                </button>
+                            </div>
+
+                            // Setup instructions
+                            <div class="setup-instructions">
+                                <h3>"Setup Instructions"</h3>
+                                <ol>
+                                    <li>"Download and install WireGuard from "<a href="https://www.wireguard.com/install/" target="_blank">"wireguard.com"</a></li>
+                                    <li>"Scan the QR code above, or import the downloaded .conf file"</li>
+                                    <li>"Activate the tunnel to connect"</li>
+                                    <li>"All your traffic is now routed through the privacy router"</li>
+                                </ol>
+                            </div>
+                        </div>
+                    }.into_view()
+                } else {
+                    view! {
+                        <div class="error-container">
+                            <p class="error-message">{result.message}</p>
+                            <p>"Please request a new login link below."</p>
+                        </div>
+                    }.into_view()
+                }
+            })}
+
+            // Show signup form if not verifying and no result
+            {move || (!verifying.get() && verify_result.get().is_none()).then(|| {
+                if submitted.get() {
+                    view! {
+                        <div class="success-container">
+                            <div class="success-icon">"✓"</div>
+                            <h3>"Check Your Email"</h3>
+                            <p>{move || success_message.get().unwrap_or_else(|| "We've sent you a login link.".to_string())}</p>
+                            <p class="email-hint">"Click the link in the email to get your VPN configuration."</p>
+                            <button
+                                class="try-again-button"
+                                on:click=move |_| {
+                                    set_submitted.set(false);
+                                    set_email.set(String::new());
+                                }
+                            >
+                                "Use Different Email"
+                            </button>
+                        </div>
+                    }.into_view()
+                } else {
+                    view! {
+                        <div class="signup-container">
+                            <div class="signup-card">
+                                <h3>"Get Started"</h3>
+                                <p>"Enter your email to receive a secure login link."</p>
+
+                                <form class="signup-form" on:submit=handle_submit>
+                                    <input
+                                        type="email"
+                                        class="email-input"
+                                        placeholder="you@example.com"
+                                        prop:value=email
+                                        on:input=move |ev| set_email.set(event_target_value(&ev))
+                                        disabled=loading
+                                        required=true
+                                    />
+                                    <button
+                                        type="submit"
+                                        class="signup-button"
+                                        disabled=loading
+                                    >
+                                        {move || if loading.get() { "Sending..." } else { "Get Access" }}
+                                    </button>
+                                </form>
+
+                                <p class="privacy-note">
+                                    "No password required. We'll email you a secure login link."
+                                </p>
+                            </div>
+
+                            <div class="features-list">
+                                <h3>"What You Get"</h3>
+                                <ul>
+                                    <li>"Full VPN tunnel - all traffic routed securely"</li>
+                                    <li>"WireGuard protocol - fast and secure"</li>
+                                    <li>"Works on all devices - phone, laptop, tablet"</li>
+                                    <li>"No tracking, no logs"</li>
+                                </ul>
+                            </div>
+                        </div>
+                    }.into_view()
+                }
+            })}
         </div>
     }
 }

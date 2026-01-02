@@ -11,34 +11,21 @@ name = "op-mcp-server"
 path = "src/main.rs"
 
 [dependencies]
-# Workspace crates
 op-chat = { workspace = true }
 op-core = { workspace = true }
 op-agents = { workspace = true }
 op-tools = { workspace = true }
 op-mcp-aggregator = { path = "../op-mcp-aggregator" }
-
-# Async runtime
 tokio = { workspace = true, features = ["full", "signal"] }
 futures = { workspace = true }
-
-# Serialization
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-
-# Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-
-# Protocol types (minimal - just what's needed for MCP)
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
-
-# HTTP/SSE transport
 axum = { workspace = true }
 tower-http = { workspace = true, features = ["cors"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

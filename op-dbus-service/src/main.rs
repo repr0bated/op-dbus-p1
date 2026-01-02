@@ -24,6 +24,8 @@ mod state;
 
 use chat::ChatInterface;
 use state::StateInterface;
+use op_plugins::prelude::PrivacyRouterPlugin;
+use op_plugins::state_plugins::privacy_router::PrivacyRouterConfig;
 
 #[derive(Parser, Debug)]
 #[command(name = "op-dbus-service")]
@@ -128,6 +130,10 @@ async fn main() -> Result<()> {
     let full_system_plugin = Arc::new(op_plugins::state_plugins::FullSystemPlugin::new());
     state_manager.register_plugin(full_system_plugin).await;
     info!("Registered FullSystemPlugin for disaster recovery");
+
+    let privacy_router_plugin = Arc::new(PrivacyRouterPlugin::new(PrivacyRouterConfig::default()));
+    state_manager.register_plugin(privacy_router_plugin).await;
+    info!("Registered PrivacyRouterPlugin");
     
     let state_manager = Arc::new(state_manager);
 

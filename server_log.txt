@@ -1,0 +1,220 @@
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   ██████╗ ██████╗       ██╗    ██╗███████╗██████╗                ║
+║  ██╔═══██╗██╔══██╗      ██║    ██║██╔════╝██╔══██╗               ║
+║  ██║   ██║██████╔╝█████╗██║ █╗ ██║█████╗  ██████╔╝               ║
+║  ██║   ██║██╔═══╝ ╚════╝██║███╗██║██╔══╝  ██╔══██╗               ║
+║  ╚██████╔╝██║           ╚███╔███╔╝███████╗██████╔╝               ║
+║   ╚═════╝ ╚═╝            ╚══╝╚══╝ ╚══════╝╚═════╝                ║
+║                                                                   ║
+║   Unified Server for op-dbus-v2                                   ║
+║   Version: 0.2.0                                            ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+[2m2025-12-31T06:05:58.331787Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m Initializing application state...
+[2m2025-12-31T06:05:58.331879Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Initializing application state...
+[2m2025-12-31T06:05:58.331928Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Loaded system prompt from: LLM-SYSTEM-PROMPT-COMPLETE.txt
+[2m2025-12-31T06:05:58.331961Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m System prompt loaded (7932 chars)
+[2m2025-12-31T06:05:58.331990Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Registering tools from all sources...
+[2m2025-12-31T06:05:58.332031Z[0m [32m INFO[0m [2mop_tools::builtin[0m[2m:[0m Registering built-in tools with security controls
+[2m2025-12-31T06:05:58.332254Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: file_read
+[2m2025-12-31T06:05:58.332323Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: file_write
+[2m2025-12-31T06:05:58.332355Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: file_list
+[2m2025-12-31T06:05:58.332391Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: file_exists
+[2m2025-12-31T06:05:58.332419Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: file_stat
+[2m2025-12-31T06:05:58.332428Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered secure file tools
+[2m2025-12-31T06:05:58.332455Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: procfs_read
+[2m2025-12-31T06:05:58.332482Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: sysfs_read
+[2m2025-12-31T06:05:58.332524Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: procfs_write
+[2m2025-12-31T06:05:58.332586Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: sysfs_write
+[2m2025-12-31T06:05:58.332609Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered procfs/sysfs tools
+[2m2025-12-31T06:05:58.332649Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: shell_execute
+[2m2025-12-31T06:05:58.332689Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: shell_execute_batch
+[2m2025-12-31T06:05:58.332703Z[0m [34mDEBUG[0m [2mop_tools::builtin::shell[0m[2m:[0m Registered shell execution tools
+[2m2025-12-31T06:05:58.332714Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered secure shell tools
+[2m2025-12-31T06:05:58.332756Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_systemd_restart_unit
+[2m2025-12-31T06:05:58.332786Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_systemd_start_unit
+[2m2025-12-31T06:05:58.332804Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_systemd_stop_unit
+[2m2025-12-31T06:05:58.332919Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_systemd_get_unit_status
+[2m2025-12-31T06:05:58.332947Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_systemd_list_units
+[2m2025-12-31T06:05:58.332993Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_services
+[2m2025-12-31T06:05:58.333036Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_introspect_service
+[2m2025-12-31T06:05:58.333062Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_objects
+[2m2025-12-31T06:05:58.333130Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_introspect_object
+[2m2025-12-31T06:05:58.333172Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_interfaces
+[2m2025-12-31T06:05:58.333213Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_methods
+[2m2025-12-31T06:05:58.333236Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_properties
+[2m2025-12-31T06:05:58.333255Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_list_signals
+[2m2025-12-31T06:05:58.333285Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_call_method
+[2m2025-12-31T06:05:58.333329Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_get_property
+[2m2025-12-31T06:05:58.333373Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_set_property
+[2m2025-12-31T06:05:58.333407Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_get_all_properties
+[2m2025-12-31T06:05:58.333418Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered D-Bus tools
+[2m2025-12-31T06:05:58.333481Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_packagekit_install_packages
+[2m2025-12-31T06:05:58.333508Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: dbus_packagekit_remove_packages
+[2m2025-12-31T06:05:58.333518Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered PackageKit tools
+[2m2025-12-31T06:05:58.333537Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_list_bridges
+[2m2025-12-31T06:05:58.333592Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_list_ports
+[2m2025-12-31T06:05:58.333608Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_capabilities
+[2m2025-12-31T06:05:58.333639Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_create_bridge
+[2m2025-12-31T06:05:58.333667Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_delete_bridge
+[2m2025-12-31T06:05:58.333694Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_add_port
+[2m2025-12-31T06:05:58.333709Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_list_datapaths
+[2m2025-12-31T06:05:58.333741Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_list_vports
+[2m2025-12-31T06:05:58.333763Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: ovs_dump_flows
+[2m2025-12-31T06:05:58.333773Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered OVS tools
+[2m2025-12-31T06:05:58.333822Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: openflow_add_flow
+[2m2025-12-31T06:05:58.333850Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: openflow_delete_flows
+[2m2025-12-31T06:05:58.333878Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: openflow_list_flows
+[2m2025-12-31T06:05:58.333911Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: openflow_create_socket_port
+[2m2025-12-31T06:05:58.333955Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: openflow_create_privacy_socket
+[2m2025-12-31T06:05:58.333969Z[0m [32m INFO[0m [2mop_tools::builtin::openflow_tools[0m[2m:[0m Registered 5 OpenFlow tools
+[2m2025-12-31T06:05:58.333977Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered OpenFlow tools
+[2m2025-12-31T06:05:58.334012Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: rtnetlink_list_interfaces
+[2m2025-12-31T06:05:58.334038Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: rtnetlink_get_default_route
+[2m2025-12-31T06:05:58.334074Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: rtnetlink_add_address
+[2m2025-12-31T06:05:58.334109Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: rtnetlink_link_up
+[2m2025-12-31T06:05:58.334138Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: rtnetlink_link_down
+[2m2025-12-31T06:05:58.334150Z[0m [32m INFO[0m [2mop_tools::builtin::rtnetlink_tools[0m[2m:[0m Registered 5 rtnetlink tools
+[2m2025-12-31T06:05:58.334157Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered rtnetlink tools
+[2m2025-12-31T06:05:58.334201Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: respond_to_user
+[2m2025-12-31T06:05:58.334243Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: cannot_perform
+[2m2025-12-31T06:05:58.334279Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: request_clarification
+[2m2025-12-31T06:05:58.334290Z[0m [34mDEBUG[0m [2mop_tools::builtin[0m[2m:[0m Registered response tools
+[2m2025-12-31T06:05:58.334332Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_read_file
+[2m2025-12-31T06:05:58.334355Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_write_file
+[2m2025-12-31T06:05:58.334378Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_list_directory
+[2m2025-12-31T06:05:58.334424Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_search_code
+[2m2025-12-31T06:05:58.334550Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_git_status
+[2m2025-12-31T06:05:58.334596Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_git_diff
+[2m2025-12-31T06:05:58.334616Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_git_commit
+[2m2025-12-31T06:05:58.334640Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_git_log
+[2m2025-12-31T06:05:58.334676Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_build
+[2m2025-12-31T06:05:58.334701Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: self_deploy
+[2m2025-12-31T06:05:58.334712Z[0m [32m INFO[0m [2mop_tools::builtin[0m[2m:[0m Registered self-repository tools - chatbot can modify its own code
+[2m2025-12-31T06:05:58.334719Z[0m [32m INFO[0m [2mop_tools::builtin[0m[2m:[0m Built-in tool registration complete
+[2m2025-12-31T06:05:58.336395Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_bash_pro
+[2m2025-12-31T06:05:58.336456Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_c_pro
+[2m2025-12-31T06:05:58.336483Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_cpp_pro
+[2m2025-12-31T06:05:58.336504Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_csharp_pro
+[2m2025-12-31T06:05:58.336540Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_elixir_pro
+[2m2025-12-31T06:05:58.336570Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_golang_pro
+[2m2025-12-31T06:05:58.336595Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_java_pro
+[2m2025-12-31T06:05:58.336615Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_javascript_pro
+[2m2025-12-31T06:05:58.336629Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_julia_pro
+[2m2025-12-31T06:05:58.336655Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_php_pro
+[2m2025-12-31T06:05:58.336681Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_python_pro
+[2m2025-12-31T06:05:58.336703Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_ruby_pro
+[2m2025-12-31T06:05:58.336733Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_rust_pro
+[2m2025-12-31T06:05:58.336758Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_scala_pro
+[2m2025-12-31T06:05:58.336780Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_typescript_pro
+[2m2025-12-31T06:05:58.336807Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_backend_architect
+[2m2025-12-31T06:05:58.336827Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_frontend_developer
+[2m2025-12-31T06:05:58.336855Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_graphql_architect
+[2m2025-12-31T06:05:58.336882Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_cloud_architect
+[2m2025-12-31T06:05:58.336910Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_deployment_engineer
+[2m2025-12-31T06:05:58.336932Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_kubernetes_architect
+[2m2025-12-31T06:05:58.336956Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_network_engineer
+[2m2025-12-31T06:05:58.336978Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_terraform_specialist
+[2m2025-12-31T06:05:58.337001Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_code_reviewer
+[2m2025-12-31T06:05:58.337027Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_debugger
+[2m2025-12-31T06:05:58.337051Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_performance_engineer
+[2m2025-12-31T06:05:58.337086Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_security_auditor
+[2m2025-12-31T06:05:58.337112Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_business_analyst
+[2m2025-12-31T06:05:58.337138Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_customer_support
+[2m2025-12-31T06:05:58.337158Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_hr_pro
+[2m2025-12-31T06:05:58.337186Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_legal_advisor
+[2m2025-12-31T06:05:58.337206Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_payment_integration
+[2m2025-12-31T06:05:58.337227Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_sales_automator
+[2m2025-12-31T06:05:58.337253Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_api_documenter
+[2m2025-12-31T06:05:58.337273Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_docs_architect
+[2m2025-12-31T06:05:58.337293Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_mermaid_expert
+[2m2025-12-31T06:05:58.337317Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_tutorial_engineer
+[2m2025-12-31T06:05:58.337351Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_database_architect
+[2m2025-12-31T06:05:58.337376Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_database_optimizer
+[2m2025-12-31T06:05:58.337414Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_sql_pro
+[2m2025-12-31T06:05:58.337443Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_devops_troubleshooter
+[2m2025-12-31T06:05:58.337522Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_incident_responder
+[2m2025-12-31T06:05:58.337567Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_test_automator
+[2m2025-12-31T06:05:58.337602Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_context_manager
+[2m2025-12-31T06:05:58.337631Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_dx_optimizer
+[2m2025-12-31T06:05:58.337651Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_tdd_orchestrator
+[2m2025-12-31T06:05:58.337680Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_backend_security_coder
+[2m2025-12-31T06:05:58.337715Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_frontend_security_coder
+[2m2025-12-31T06:05:58.337781Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_mobile_security_coder
+[2m2025-12-31T06:05:58.337809Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_content_marketer
+[2m2025-12-31T06:05:58.337892Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_search_specialist
+[2m2025-12-31T06:05:58.337919Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_seo_content_writer
+[2m2025-12-31T06:05:58.337935Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_seo_keyword_strategist
+[2m2025-12-31T06:05:58.337956Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_seo_meta_optimizer
+[2m2025-12-31T06:05:58.337984Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_arm_cortex_expert
+[2m2025-12-31T06:05:58.338010Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_blockchain_developer
+[2m2025-12-31T06:05:58.338035Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_error_detective
+[2m2025-12-31T06:05:58.338058Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_hybrid_cloud_architect
+[2m2025-12-31T06:05:58.338080Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_legacy_modernizer
+[2m2025-12-31T06:05:58.338102Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_observability_engineer
+[2m2025-12-31T06:05:58.338129Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_quant_analyst
+[2m2025-12-31T06:05:58.338156Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_ui_ux_designer
+[2m2025-12-31T06:05:58.338194Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_unity_developer
+[2m2025-12-31T06:05:58.338227Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_ai_engineer
+[2m2025-12-31T06:05:58.338257Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_data_engineer
+[2m2025-12-31T06:05:58.338282Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_data_scientist
+[2m2025-12-31T06:05:58.338304Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_ml_engineer
+[2m2025-12-31T06:05:58.338326Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_mlops_engineer
+[2m2025-12-31T06:05:58.338361Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_prompt_engineer
+[2m2025-12-31T06:05:58.338400Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_django_pro
+[2m2025-12-31T06:05:58.338442Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_fastapi_pro
+[2m2025-12-31T06:05:58.338476Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_temporal_python_pro
+[2m2025-12-31T06:05:58.338507Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_flutter_expert
+[2m2025-12-31T06:05:58.338569Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_ios_developer
+[2m2025-12-31T06:05:58.338604Z[0m [34mDEBUG[0m [2mop_tools::registry[0m[2m:[0m Registered tool: agent_mobile_developer
+[2m2025-12-31T06:05:58.338615Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Registered 75 agent tools
+[2m2025-12-31T06:05:58.339489Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Registered 137 tools total
+[2m2025-12-31T06:05:58.339541Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Agent registry initialized
+[2m2025-12-31T06:05:58.347732Z[0m [32m INFO[0m [2mop_llm::gemini[0m[2m:[0m ✅ Vertex AI mode (service account): project=geminidev-479406, location=global
+[2m2025-12-31T06:05:58.348433Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m ✅ Gemini 3 provider initialized (Vertex AI)
+[2m2025-12-31T06:05:58.348456Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m    🏢 Code Assist Enterprise
+[2m2025-12-31T06:05:58.348465Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m    🔥 Model: gemini-2.5-flash (auto-updating)
+[2m2025-12-31T06:05:58.349353Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m 
+📊 Default provider: Gemini
+[2m2025-12-31T06:05:58.349381Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m 📊 Default model: gemini-2.5-flash
+[2m2025-12-31T06:05:58.349391Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m 📊 Total providers available: 1
+
+[2m2025-12-31T06:05:58.349890Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m Switched to provider: Gemini
+[2m2025-12-31T06:05:58.349922Z[0m [32m INFO[0m [2mop_llm::gemini[0m[2m:[0m Gemini models (static list)
+[2m2025-12-31T06:05:58.349931Z[0m [32m INFO[0m [2mop_llm::gemini[0m[2m:[0m   Mode: Vertex AI
+[2m2025-12-31T06:05:58.349938Z[0m [32m INFO[0m [2mop_llm::gemini[0m[2m:[0m   Endpoint: https://aiplatform.googleapis.com/v1/projects/geminidev-479406/locations/global/publishers/google/models
+[2m2025-12-31T06:05:58.350478Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m Default model set to: gemini-auto
+[2m2025-12-31T06:05:58.350522Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Loaded persisted provider: gemini
+[2m2025-12-31T06:05:58.350663Z[0m [32m INFO[0m [2mop_llm::chat[0m[2m:[0m Switched to model: gemini-3-pro-preview
+[2m2025-12-31T06:05:58.350694Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Loaded persisted model: gemini-3-pro-preview
+[2m2025-12-31T06:05:58.350705Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m LLM Provider: Gemini (gemini-3-pro-preview)
+[2m2025-12-31T06:05:58.350773Z[0m [32m INFO[0m [2mop_web_server::state[0m[2m:[0m Application state initialized successfully
+[2m2025-12-31T06:05:58.352090Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m ✅ Loaded 137 tools
+[2m2025-12-31T06:05:58.352123Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m ✅ 75 agent types available
+[2m2025-12-31T06:05:58.352132Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m ✅ LLM Provider: Gemini (gemini-3-pro-preview)
+[2m2025-12-31T06:05:58.353764Z[0m [32m INFO[0m [2mop_web_server::routes[0m[2m:[0m Serving static files from: dist
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         Server Ready                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  🌐 Web UI:        http://localhost:8080                       │
+│  📡 REST API:      http://localhost:8080 /api/                 │
+│  💬 WebSocket:     ws://localhost:8080 /ws                     │
+│  📊 Health:        http://localhost:8080 /api/health           │
+│                                                                 │
+│  🔧 MCP Tool Picker:                                            │
+│     http://localhost:8080 /mcp-picker                          │
+│                                                                 │
+│  📋 MCP Endpoints:                                              │
+│     Profiles:  /mcp/profiles                                    │
+│     Custom:    /mcp/custom/{name}                               │
+│     Discover:  /mcp/_discover                                   │
+│                                                                 │
+│  Press Ctrl+C to stop                                           │
+└─────────────────────────────────────────────────────────────────┘
+
+[2m2025-12-31T06:06:09.641505Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m Received terminate signal, shutting down...
+[2m2025-12-31T06:06:09.641745Z[0m [32m INFO[0m [2mop_web_server[0m[2m:[0m Server shutdown complete

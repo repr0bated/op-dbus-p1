@@ -109,4 +109,3 @@ pub async fn run_sse_server(mcp_server: Arc<McpServer>, bind_addr: &str) -> anyh
     axum::serve(listener, app).await?;
     Ok(())
 }
-

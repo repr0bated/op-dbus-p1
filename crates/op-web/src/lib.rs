@@ -25,6 +25,7 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
+pub mod email;
 pub mod handlers;
 pub mod mcp;
 pub mod mcp_picker;
@@ -33,7 +34,9 @@ pub mod orchestrator;
 pub mod routes;
 pub mod sse;
 pub mod state;
+pub mod users;
 pub mod websocket;
+pub mod wireguard;
 
 pub use mcp_picker::CUSTOM_PROFILES;
 pub use orchestrator::UnifiedOrchestrator;

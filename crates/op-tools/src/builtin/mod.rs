@@ -17,13 +17,16 @@
 //! - **ProcFs/SysFs Tools**: Read-only access to /proc and /sys
 //! - **D-Bus Tools**: Native protocol access to system services
 //! - **OVS Tools**: Native OVSDB JSON-RPC for Open vSwitch
+//! - **LXC Tools**: Native Proxmox REST API for LXC container management
 //! - **Response Tools**: LLM response handling for anti-hallucination
 //! - **Self Tools**: Git and code editing for the chatbot's own source code
 
 mod dbus;
 mod dbus_introspection;
+mod error_reporting_tool;
 mod ovs_tools;
 mod openflow_tools;
+mod lxc_tools;
 mod packagekit;
 mod rtnetlink_tools;
 mod shell;
@@ -39,6 +42,7 @@ pub use file::{FileTool, SecureFileTool};
 pub use procfs::{ProcFsReadTool, ProcFsWriteTool, SysFsReadTool, SysFsWriteTool};
 pub use shell::register_shell_tools;
 pub use ovs_tools::register_ovs_tools;
+pub use lxc_tools::register_lxc_tools;
 pub use self_tools::{create_self_tools, get_self_repo_system_context};
 
 use crate::ToolRegistry;
@@ -98,10 +102,15 @@ pub async fn register_response_tools(registry: &ToolRegistry) -> anyhow::Result<
     rtnetlink_tools::register_rtnetlink_tools(registry).await?;
     debug!("Registered rtnetlink tools");
 
+    // LXC tools (native Proxmox REST API)
+    lxc_tools::register_lxc_tools(registry).await?;
+    debug!("Registered LXC tools (native Proxmox API)");
+
     // Response tools (for anti-hallucination)
     for tool in response_tools::create_response_tools() {
         registry.register_tool(tool).await?;
     }
+    registry.register_tool(Arc::new(error_reporting_tool::ReportInternalErrorTool)).await?;
     debug!("Registered response tools");
 
     // Self-repository tools (if OP_SELF_REPO_PATH is configured)

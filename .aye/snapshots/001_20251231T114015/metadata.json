@@ -1,0 +1,10 @@
+{
+  "timestamp": "20251231T114015",
+  "files": [
+    {
+      "original": "/home/jeremy/git/op-dbus-v2/crates/op-tools/src/builtin/ovs_tools.rs",
+      "snapshot": "/home/jeremy/git/op-dbus-v2/.aye/snapshots/001_20251231T114015/ovs_tools.rs"
+    }
+  ],
+  "prompt": "you used forbidden command only native rcp-json calls no ovs cli commands and when building need to copy binary"
+}

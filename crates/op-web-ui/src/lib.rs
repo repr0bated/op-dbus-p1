@@ -23,13 +23,9 @@ pub use state::*;
 /// Main application component
 #[component]
 pub fn App() -> impl IntoView {
-    // Initialize tracing for WASM
-    tracing_wasm::set_as_global_default();
-
     // Create global application state
     let app_state = create_rw_signal(AppState::new());
     provide_context(app_state);
-    provide_context(RouterIntegrationContext::new(BrowserIntegration {}));
 
     view! {
         <Router>
@@ -40,6 +36,7 @@ pub fn App() -> impl IntoView {
                     <Route path="/tools" view=ToolsPage/>
                     <Route path="/status" view=StatusPage/>
                     <Route path="/models" view=ModelsPage/>
+                    <Route path="/privacy" view=PrivacyPage/>
                     <Route path="/settings" view=SettingsPage/>
                 </Routes>
             </main>

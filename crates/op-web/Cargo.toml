@@ -53,3 +53,12 @@ thiserror = { workspace = true }
 sysinfo = "0.30"
 gethostname = { workspace = true }
 lazy_static = "1.4"
+regex = { workspace = true }
+
+# Privacy router signup
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = { workspace = true }
+qrcode = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder"] }

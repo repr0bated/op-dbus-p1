@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::tool::{BoxedTool, Tool};
 
@@ -246,6 +246,23 @@ impl DbusAgentExecutor {
             .collect::<String>();
         format!("/org/dbusmcp/Agent/{}", pascal)
     }
+
+    /// Check if an error indicates the D-Bus service is unavailable
+    fn is_service_unavailable_error(error: &zbus::Error) -> bool {
+        let error_str = error.to_string().to_lowercase();
+        
+        // Check for common D-Bus service unavailable patterns
+        error_str.contains("serviceunknown")
+            || error_str.contains("name has no owner")
+            || error_str.contains("namehasnoowner")
+            || error_str.contains("not found")
+            || error_str.contains("does not exist")
+            || error_str.contains("service unknown")
+            || error_str.contains("no such")
+            || error_str.contains("connection refused")
+            || error_str.contains("not available")
+            || matches!(error, zbus::Error::NameTaken | zbus::Error::Address(_))
+    }
 }
 
 impl Default for DbusAgentExecutor {
@@ -264,6 +281,9 @@ impl AgentExecutor for DbusAgentExecutor {
         args: Option<Value>,
     ) -> Result<Value> {
         use zbus::Connection;
+
+        let service_name = Self::to_service_name(agent_name);
+        let object_path = Self::to_object_path(agent_name);
 
         // Build task JSON for the agent
         // Convert args to string if present (agents expect args as string, not object)
@@ -290,14 +310,39 @@ impl AgentExecutor for DbusAgentExecutor {
             "Calling agent via D-Bus"
         );
 
-        // Connect to D-Bus
+        // Connect to D-Bus - handle connection failure gracefully
         let connection = match self.bus_type {
-            op_core::BusType::System => Connection::system().await?,
-            op_core::BusType::Session => Connection::session().await?,
+            op_core::BusType::System => {
+                match Connection::system().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!(agent = %agent_name, error = %e, "Failed to connect to system D-Bus");
+                        return Ok(serde_json::json!({
+                            "available": false,
+                            "agent": agent_name,
+                            "operation": operation,
+                            "error": format!("D-Bus connection failed: {}", e),
+                            "message": "Agent service is not available (D-Bus connection failed)"
+                        }));
+                    }
+                }
+            }
+            op_core::BusType::Session => {
+                match Connection::session().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!(agent = %agent_name, error = %e, "Failed to connect to session D-Bus");
+                        return Ok(serde_json::json!({
+                            "available": false,
+                            "agent": agent_name,
+                            "operation": operation,
+                            "error": format!("D-Bus connection failed: {}", e),
+                            "message": "Agent service is not available (D-Bus connection failed)"
+                        }));
+                    }
+                }
+            }
         };
-
-        let service_name = Self::to_service_name(agent_name);
-        let object_path = Self::to_object_path(agent_name);
 
         debug!(
             service = %service_name,
@@ -305,19 +350,76 @@ impl AgentExecutor for DbusAgentExecutor {
             "D-Bus call target"
         );
 
-        // Create proxy and call Execute method
-        let proxy: zbus::Proxy = zbus::proxy::Builder::new(&connection)
-            .destination(service_name.as_str())?
-            .path(object_path.as_str())?
-            .interface("org.dbusmcp.Agent")?
-            .build()
-            .await?;
+        // Create proxy - handle build failure gracefully
+        let proxy: zbus::Proxy = match zbus::proxy::Builder::new(&connection)
+            .destination(service_name.as_str())
+            .and_then(|b| b.path(object_path.as_str()))
+            .and_then(|b| b.interface("org.dbusmcp.Agent"))
+        {
+            Ok(builder) => {
+                match builder.build().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if Self::is_service_unavailable_error(&e) {
+                            warn!(agent = %agent_name, service = %service_name, "Agent service not available on D-Bus");
+                            return Ok(serde_json::json!({
+                                "available": false,
+                                "agent": agent_name,
+                                "service": service_name,
+                                "operation": operation,
+                                "error": format!("Service not found: {}", e),
+                                "message": format!("Agent '{}' is not running or not registered on D-Bus", agent_name)
+                            }));
+                        }
+                        error!(error = %e, "D-Bus proxy build failed");
+                        return Err(anyhow::anyhow!("D-Bus proxy build failed: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(agent = %agent_name, error = %e, "Failed to build D-Bus proxy");
+                return Ok(serde_json::json!({
+                    "available": false,
+                    "agent": agent_name,
+                    "operation": operation,
+                    "error": format!("Proxy configuration error: {}", e),
+                    "message": "Agent service is not available (proxy configuration failed)"
+                }));
+            }
+        };
 
-        // Call the Execute method
-        let result: String = proxy.call("Execute", &(task_json,)).await.map_err(|e| {
-            error!(error = %e, "D-Bus call failed");
-            anyhow::anyhow!("D-Bus call failed: {}", e)
-        })?;
+        // Call the Execute method - handle service unavailable gracefully
+        let result: String = match proxy.call("Execute", &(task_json,)).await {
+            Ok(r) => r,
+            Err(e) => {
+                if Self::is_service_unavailable_error(&e) {
+                    warn!(
+                        agent = %agent_name,
+                        service = %service_name,
+                        error = %e,
+                        "Agent D-Bus service not available"
+                    );
+                    return Ok(serde_json::json!({
+                        "available": false,
+                        "agent": agent_name,
+                        "service": service_name,
+                        "operation": operation,
+                        "error": e.to_string(),
+                        "message": format!("Agent '{}' is not running. The D-Bus service '{}' is not registered.", agent_name, service_name)
+                    }));
+                }
+                // For other errors, still return gracefully but log as error
+                error!(error = %e, agent = %agent_name, "D-Bus call failed");
+                return Ok(serde_json::json!({
+                    "available": false,
+                    "agent": agent_name,
+                    "service": service_name,
+                    "operation": operation,
+                    "error": e.to_string(),
+                    "message": format!("D-Bus call to agent '{}' failed: {}", agent_name, e)
+                }));
+            }
+        };
 
         // Parse result JSON
         let parsed: Value = serde_json::from_str(&result).map_err(|e| {

@@ -68,12 +68,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mcp/_config/claude", get(mcp::claude_config_handler))
         // SSE events
         .route("/events", get(sse::sse_handler))
+        // Privacy router endpoints
+        .route("/privacy/signup", post(handlers::privacy::signup))
+        .route("/privacy/verify", get(handlers::privacy::verify))
+        .route("/privacy/config/:user_id", get(handlers::privacy::get_config))
+        .route("/privacy/status", get(handlers::privacy::status))
         .with_state(state.clone());
 
-    // MCP JSON-RPC endpoint (at root level)
+    // MCP JSON-RPC endpoints (profile-based and legacy)
     let mcp_route = Router::new()
-        .route("/mcp", post(mcp::mcp_handler))
-        .with_state(state.clone());
+        .nest("/mcp", mcp::create_mcp_router(state.clone()));
 
     // WebSocket route
     let ws_route = Router::new()

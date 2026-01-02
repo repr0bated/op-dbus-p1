@@ -5,6 +5,7 @@
 use crate::plugin::{ApplyResult, Checkpoint, StateDiff, StatePlugin};
 use anyhow::{anyhow, Result};
 use op_blockchain::PluginFootprint;
+use op_state_store::{SchemaRegistry, SqliteStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -41,6 +42,10 @@ pub struct StateManager {
     plugins: Arc<RwLock<HashMap<String, Arc<dyn StatePlugin>>>>,
     workflows: std::sync::Mutex<crate::plugin_workflow::PluginWorkflowManager>,
     blockchain_sender: Option<FootprintSender>,
+    /// SQLite store for persistent state (optional)
+    store: Option<Arc<SqliteStore>>,
+    /// Schema registry for validation
+    schema_registry: Arc<SchemaRegistry>,
 }
 
 impl Default for StateManager {
@@ -56,7 +61,44 @@ impl StateManager {
             plugins: Arc::new(RwLock::new(HashMap::new())),
             workflows: std::sync::Mutex::new(crate::plugin_workflow::PluginWorkflowManager::new()),
             blockchain_sender: None,
+            store: None,
+            schema_registry: Arc::new(SchemaRegistry::new()),
         }
+    }
+
+    /// Create a state manager with SQLite persistence
+    pub async fn with_store(db_path: &str) -> Result<Self> {
+        let store = SqliteStore::new(db_path).await?;
+        log::info!("StateManager initialized with SQLite store: {}", db_path);
+
+        Ok(Self {
+            plugins: Arc::new(RwLock::new(HashMap::new())),
+            workflows: std::sync::Mutex::new(crate::plugin_workflow::PluginWorkflowManager::new()),
+            blockchain_sender: None,
+            store: Some(Arc::new(store)),
+            schema_registry: Arc::new(SchemaRegistry::new()),
+        })
+    }
+
+    /// Set the SQLite store for persistence
+    pub fn set_store(&mut self, store: Arc<SqliteStore>) {
+        log::info!("SQLite state store configured");
+        self.store = Some(store);
+    }
+
+    /// Get reference to the store (if configured)
+    pub fn store(&self) -> Option<&Arc<SqliteStore>> {
+        self.store.as_ref()
+    }
+
+    /// Get reference to the schema registry
+    pub fn schema_registry(&self) -> &Arc<SchemaRegistry> {
+        &self.schema_registry
+    }
+
+    /// Validate state against plugin schema
+    pub fn validate_plugin_state(&self, plugin_name: &str, state: &Value) -> Option<op_state_store::SchemaValidationResult> {
+        self.schema_registry.validate(plugin_name, state)
     }
 
     /// Enable blockchain footprints by providing a sender to a StreamingBlockchain receiver
@@ -70,12 +112,61 @@ impl StateManager {
         self.blockchain_sender.is_some()
     }
 
+    /// Check if persistent store is enabled
+    pub fn is_store_enabled(&self) -> bool {
+        self.store.is_some()
+    }
+
     /// Record a hashed footprint for a plugin operation (best-effort, non-blocking)
     fn record_footprint(&self, plugin: &str, operation: &str, data: serde_json::Value) {
         if let Some(tx) = &self.blockchain_sender {
             let footprint = PluginFootprint::new(plugin, operation, &data);
             if let Err(e) = tx.send(footprint) {
                 log::debug!("Failed to send footprint for {}: {}", plugin, e);
+            }
+        }
+    }
+
+    /// Save plugin state to persistent store
+    async fn persist_plugin_state(&self, plugin_name: &str, state: &Value) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_plugin_state(plugin_name, state).await {
+                log::warn!("Failed to persist plugin state for {}: {}", plugin_name, e);
+            }
+        }
+    }
+
+    /// Save checkpoint to persistent store
+    async fn persist_checkpoint(&self, checkpoint: &Checkpoint) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store
+                .save_checkpoint(
+                    &checkpoint.id,
+                    &checkpoint.plugin,
+                    checkpoint.timestamp,
+                    &checkpoint.state_snapshot,
+                    checkpoint.backend_checkpoint.as_ref(),
+                )
+                .await
+            {
+                log::warn!("Failed to persist checkpoint {}: {}", checkpoint.id, e);
+            }
+        }
+    }
+
+    /// Log audit entry
+    async fn audit_log(&self, plugin_name: &str, operation: &str, data: &Value) {
+        if let Some(store) = &self.store {
+            let footprint_hash = self.blockchain_sender.as_ref().map(|_| {
+                let footprint = PluginFootprint::new(plugin_name, operation, data);
+                footprint.content_hash.clone()
+            });
+            
+            if let Err(e) = store
+                .log_audit(plugin_name, operation, data, footprint_hash.as_deref())
+                .await
+            {
+                log::debug!("Failed to log audit entry: {}", e);
             }
         }
     }
@@ -260,6 +351,8 @@ impl StateManager {
 
             if let Some(checkpoint) = checkpoint_opt {
                 log::info!("Created checkpoint for plugin: {}", plugin_name);
+                // Persist checkpoint to store
+                self.persist_checkpoint(&checkpoint).await;
                 checkpoints.push((plugin_name.clone(), checkpoint));
             }
         }
@@ -318,7 +411,15 @@ impl StateManager {
                             "errors": result.errors,
                         }
                     });
-                    self.record_footprint(&diff.plugin, "apply", data);
+                    self.record_footprint(&diff.plugin, "apply", data.clone());
+
+                    // Log to audit trail
+                    self.audit_log(&diff.plugin, "apply", &data).await;
+
+                    // Persist updated plugin state
+                    if let Some(desired_state) = desired.plugins.get(&diff.plugin) {
+                        self.persist_plugin_state(&diff.plugin, desired_state).await;
+                    }
 
                     // Check if result indicates failure
                     if !result.success {
@@ -356,7 +457,10 @@ impl StateManager {
                         "metadata": diff.metadata,
                         "error": e.to_string(),
                     });
-                    self.record_footprint(&diff.plugin, "apply_error", data);
+                    self.record_footprint(&diff.plugin, "apply_error", data.clone());
+
+                    // Log error to audit trail
+                    self.audit_log(&diff.plugin, "apply_error", &data).await;
                 }
                 None => {
                     log::error!("Plugin {} not found during apply phase", diff.plugin);

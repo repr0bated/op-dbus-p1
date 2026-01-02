@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "op-dbus-sysadmin": {
+      "serverUrl": "http://localhost:8081/mcp/profile/sysadmin",
+      "transport": "sse",
+      "description": "System administration (shell, systemd, process)"
+    },
+    "op-dbus-network": {
+      "serverUrl": "http://localhost:8081/mcp/profile/network",
+      "transport": "sse",
+      "description": "Network tools (OVS, rtnetlink, bridge)"
+    },
+    "op-dbus-containers": {
+      "serverUrl": "http://localhost:8081/mcp/profile/containers",
+      "transport": "sse",
+      "description": "Container management (LXC, Docker)"
+    },
+    "op-dbus-antigravity": {
+      "serverUrl": "http://localhost:8081/mcp/profile/antigravity",
+      "transport": "sse",
+      "description": "All agents - excludes direct server config"
+    }
+  }
+}
