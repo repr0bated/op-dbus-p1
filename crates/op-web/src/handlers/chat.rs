@@ -133,7 +133,7 @@ pub async fn get_history_handler(
     Path(session_id): Path<String>,
 ) -> Json<Value> {
     let conversations = state.conversations.read().await;
-    
+
     if let Some(history) = conversations.get(&session_id) {
         Json(json!({
             "session_id": session_id,
@@ -146,6 +146,130 @@ pub async fn get_history_handler(
         Json(json!({
             "session_id": session_id,
             "messages": []
+        }))
+    }
+}
+
+/// POST /api/chat/transcript - Save conversation transcript to file
+/// Accepts either a session_id to save from memory, or direct messages array
+pub async fn save_transcript_handler(
+    State(state): State<Arc<AppState>>,
+    Json(params): Json<Value>,
+) -> Json<Value> {
+    let filename = params
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("chat-transcript-{}.txt", chrono::Utc::now().timestamp()));
+
+    // Check if session_id is provided (for existing conversations)
+    if let Some(session_id) = params.get("session_id").and_then(|v| v.as_str()) {
+        let conversations = state.conversations.read().await;
+
+        if let Some(history) = conversations.get(session_id) {
+            if history.is_empty() {
+                return Json(json!({
+                    "success": false,
+                    "error": "No messages in conversation"
+                }));
+            }
+            return save_transcript_to_file(history, filename.as_str(), Some(session_id)).await;
+        } else {
+            return Json(json!({
+                "success": false,
+                "error": "Conversation not found"
+            }));
+        }
+    }
+
+    // Check if messages array is provided directly
+    if let Some(messages) = params.get("messages").and_then(|v| v.as_array()) {
+        if messages.is_empty() {
+            return Json(json!({
+                "success": false,
+                "error": "No messages provided"
+            }));
+        }
+
+        // Convert Value array to ChatMessage vector
+        let mut history = Vec::new();
+        for msg in messages {
+            if let (Some(role), Some(content)) = (
+                msg.get("role").and_then(|v| v.as_str()),
+                msg.get("content").and_then(|v| v.as_str())
+            ) {
+                history.push(op_llm::ChatMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+        }
+
+        if history.is_empty() {
+            return Json(json!({
+                "success": false,
+                "error": "Invalid message format"
+            }));
+        }
+
+        return save_transcript_to_file(&history, filename.as_str(), None).await;
+    }
+
+    Json(json!({
+        "success": false,
+        "error": "Either session_id or messages array required",
+        "usage": {
+            "by_session_id": {"session_id": "session-123", "filename": "optional-filename.txt"},
+            "by_messages": {"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}], "filename": "optional-filename.txt"}
+        }
+    }))
+}
+
+async fn save_transcript_to_file(history: &[op_llm::ChatMessage], filename: &str, session_id: Option<&str>) -> Json<Value> {
+    // Format transcript
+    let mut transcript = String::new();
+
+    if let Some(session) = session_id {
+        transcript.push_str(&format!("Chat Transcript - Session: {}\n", session));
+    } else {
+        transcript.push_str("Chat Transcript\n");
+    }
+
+    transcript.push_str(&format!("Generated: {}\n", chrono::Utc::now().to_rfc3339()));
+    transcript.push_str(&"=".repeat(50));
+    transcript.push_str("\n\n");
+
+    for (i, message) in history.iter().enumerate() {
+        let role = match message.role.as_str() {
+            "user" => "👤 User",
+            "assistant" => "🤖 Assistant",
+            "system" => "⚙️ System",
+            _ => "Unknown",
+        };
+        transcript.push_str(&format!("[{}] {}\n\n", role, message.content));
+        if i < history.len() - 1 {
+            let separator = "─".repeat(30);
+            transcript.push_str(&separator);
+            transcript.push_str("\n\n");
+        }
+    }
+
+    // Save to file
+    let filepath = format!("/tmp/{}", filename);
+    match tokio::fs::write(&filepath, &transcript).await {
+        Ok(_) => Json(json!({
+            "success": true,
+            "message": "Transcript saved successfully",
+            "filepath": filepath,
+            "filename": filename,
+            "message_count": history.len(),
+            "transcript_preview": transcript.chars().take(200).collect::<String>() + "..."
+        })),
+        Err(e) => Json(json!({
+            "success": false,
+            "error": format!("Failed to save transcript: {}", e)
         }))
     }
 }

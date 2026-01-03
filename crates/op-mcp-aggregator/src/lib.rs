@@ -74,8 +74,7 @@ pub mod profile;
 pub mod aggregator;
 pub mod cache;
 pub mod compact;
-pub mod groups;
-pub mod context;
+pub mod groups;  // Used by op-web for IP-based security
 
 // Re-exports
 pub use aggregator::{Aggregator, ToolMode, AggregatorStats, HealthStatus};
@@ -84,8 +83,7 @@ pub use profile::ProfileManager;
 pub use client::McpClient;
 pub use cache::ToolCache;
 pub use compact::{CompactModeConfig, create_compact_tools, compact_mode_summary};
-pub use groups::{ToolGroups, ToolGroup, GroupStatus, SecurityLevel, AccessZone, NetworkConfig, builtin_groups, builtin_presets};
-pub use context::{ContextAwareTools, ConversationContext, ContextSuggestion};
+pub use groups::{AccessZone, SecurityLevel, NetworkConfig, builtin_groups, builtin_presets};
 
 /// Prelude for convenient imports
 pub mod prelude {
@@ -93,7 +91,6 @@ pub mod prelude {
         Aggregator, AggregatorConfig, UpstreamServer, ProfileConfig,
         ProfileManager, McpClient, ToolCache, ToolMode,
         CompactModeConfig, create_compact_tools,
-        ToolGroups, ToolGroup, builtin_groups, builtin_presets,
-        ContextAwareTools, ConversationContext,
+        AccessZone, SecurityLevel, NetworkConfig,
     };
 }

@@ -117,25 +117,15 @@ impl UnifiedOrchestrator {
 
     /// Process through LLM with tool calling (multi-turn)
     async fn process_with_llm(&self, input: &str) -> Result<OrchestratorResponse> {
-        const MAX_TURNS: usize = 10; // Prevent infinite loops
+        const MAX_TURNS: usize = 50; // Allow complex multi-step tasks to complete
         
-        // Build tool definitions from registry
-        let tools = self.tool_registry.list().await;
-        let tool_defs: Vec<ToolDefinition> = tools
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.input_schema.clone(),
-            })
-            .collect();
-
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+        // Use compact mode - only expose 4 meta-tools
+        let tool_defs = self.build_compact_mode_tools();
         
-        info!("LLM has access to {} tools", tool_defs.len());
+        info!("LLM using compact mode with {} meta-tools", tool_defs.len());
 
-        // Build system prompt
-        let system_prompt = self.build_system_prompt(&tool_names);
+        // Build system prompt for compact mode
+        let system_prompt = self.build_compact_mode_system_prompt();
 
         // Get model
         let model = self.chat_manager.current_model().await;
@@ -198,8 +188,14 @@ impl UnifiedOrchestrator {
                 }
             }
 
-            // Text-based tool calls (fallback)
-            let text_tools = self.extract_tool_calls_from_text(&response.message.content, &tool_names);
+            // Text-based tool calls (fallback) - in compact mode, only check for the 4 meta-tools
+            let compact_tool_names = vec![
+                "list_tools".to_string(),
+                "search_tools".to_string(),
+                "get_tool_schema".to_string(),
+                "execute_tool".to_string(),
+            ];
+            let text_tools = self.extract_tool_calls_from_text(&response.message.content, &compact_tool_names);
             for (name, args) in text_tools {
                 if !turn_tools.iter().any(|(n, _)| n == &name) {
                     turn_tools.push((name, args));
@@ -339,6 +335,26 @@ impl UnifiedOrchestrator {
 
     /// Execute a single tool
     async fn execute_tool(&self, name: &str, args: Value) -> ToolResult {
+        // Handle compact mode meta-tools
+        match name {
+            "list_tools" => return self.handle_list_tools(args).await,
+            "search_tools" => return self.handle_search_tools(args).await,
+            "get_tool_schema" => return self.handle_get_tool_schema(args).await,
+            "execute_tool" => {
+                // Extract the actual tool name and arguments
+                let tool_name = args.get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tool_args = args.get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
+                // Recursively execute the actual tool (boxed to avoid infinite future)
+                return Box::pin(self.execute_tool(tool_name, tool_args)).await;
+            }
+            _ => {}
+        }
+
+        // Execute actual tool from registry
         match self.tool_registry.get(name).await {
             Some(tool) => {
                 match tool.execute(args).await {
@@ -365,11 +381,139 @@ impl UnifiedOrchestrator {
                     name: name.to_string(),
                     success: false,
                     result: None,
-                    error: Some(format!("Tool not found: {}", name)),
+                    error: Some(format!("Tool not found: {}. Use list_tools or search_tools to find available tools.", name)),
                 }
             }
         }
     }
+
+    /// Handle list_tools meta-tool
+    async fn handle_list_tools(&self, args: Value) -> ToolResult {
+        let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("all");
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+        let all_tools = self.tool_registry.list().await;
+        
+        let filtered: Vec<_> = if category == "all" {
+            all_tools
+        } else {
+            all_tools.into_iter()
+                .filter(|t| {
+                    match category {
+                        "ovs" => t.name.starts_with("ovs_"),
+                        "systemd" => t.name.starts_with("dbus_systemd_"),
+                        "dbus" => t.name.starts_with("dbus_"),
+                        "file" => t.name.starts_with("file_"),
+                        "shell" => t.name.starts_with("shell_"),
+                        "network" => t.name.starts_with("rtnetlink_"),
+                        "openflow" => t.name.starts_with("openflow_"),
+                        "agent" => t.name.starts_with("agent_"),
+                        _ => false,
+                    }
+                })
+                .collect()
+        };
+
+        let tools_json: Vec<Value> = filtered.iter()
+            .take(limit)
+            .map(|t| json!({
+                "name": t.name,
+                "description": t.description,
+            }))
+            .collect();
+
+        ToolResult {
+            name: "list_tools".to_string(),
+            success: true,
+            result: Some(json!({
+                "tools": tools_json,
+                "total": filtered.len(),
+                "showing": tools_json.len(),
+                "category": category,
+            })),
+            error: None,
+        }
+    }
+
+    /// Handle search_tools meta-tool
+    async fn handle_search_tools(&self, args: Value) -> ToolResult {
+        let query = args.get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if query.is_empty() {
+            return ToolResult {
+                name: "search_tools".to_string(),
+                success: false,
+                result: None,
+                error: Some("Query parameter is required".to_string()),
+            };
+        }
+
+        let all_tools = self.tool_registry.list().await;
+        let matches: Vec<Value> = all_tools.iter()
+            .filter(|t| {
+                t.name.to_lowercase().contains(&query) ||
+                t.description.to_lowercase().contains(&query)
+            })
+            .map(|t| json!({
+                "name": t.name,
+                "description": t.description,
+            }))
+            .collect();
+
+        ToolResult {
+            name: "search_tools".to_string(),
+            success: true,
+            result: Some(json!({
+                "query": query,
+                "matches": matches,
+                "count": matches.len(),
+            })),
+            error: None,
+        }
+    }
+
+    /// Handle get_tool_schema meta-tool
+    async fn handle_get_tool_schema(&self, args: Value) -> ToolResult {
+        let tool_name = args.get("tool_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if tool_name.is_empty() {
+            return ToolResult {
+                name: "get_tool_schema".to_string(),
+                success: false,
+                result: None,
+                error: Some("tool_name parameter is required".to_string()),
+            };
+        }
+
+        match self.tool_registry.get(tool_name).await {
+            Some(tool_def) => {
+                ToolResult {
+                    name: "get_tool_schema".to_string(),
+                    success: true,
+                    result: Some(json!({
+                        "tool_name": tool_name,
+                        "description": tool_def.description(),
+                        "input_schema": tool_def.input_schema(),
+                    })),
+                    error: None,
+                }
+            }
+            None => {
+                ToolResult {
+                    name: "get_tool_schema".to_string(),
+                    success: false,
+                    result: None,
+                    error: Some(format!("Tool not found: {}. Use list_tools or search_tools to find available tools.", tool_name)),
+                }
+            }
+        }
+    }
+
 
     /// Execute direct tool command: "tool_name {json_args}"
     async fn execute_direct_tool(&self, input: &str) -> Result<OrchestratorResponse> {
@@ -472,54 +616,131 @@ impl UnifiedOrchestrator {
         calls
     }
 
-    /// Build system prompt with tool list
-    fn build_system_prompt(&self, tool_names: &[String]) -> String {
-        let mut prompt = String::from(r#"You are an AI system administrator with DIRECT access to system tools.
+    /// Build compact mode tool definitions (4 meta-tools)
+    fn build_compact_mode_tools(&self) -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "list_tools".to_string(),
+                description: "List available tools by category. Use this to discover what tools are available.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": "Optional category filter (ovs, systemd, dbus, file, shell, network, openflow, agent)",
+                            "enum": ["ovs", "systemd", "dbus", "file", "shell", "network", "openflow", "agent", "all"]
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of tools to return (default: 50)",
+                            "default": 50
+                        }
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "search_tools".to_string(),
+                description: "Search for tools by keyword in name or description.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query (e.g., 'bridge', 'restart', 'network')"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolDefinition {
+                name: "get_tool_schema".to_string(),
+                description: "Get the input schema for a specific tool before executing it.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Name of the tool to get schema for"
+                        }
+                    },
+                    "required": ["tool_name"]
+                }),
+            },
+            ToolDefinition {
+                name: "execute_tool".to_string(),
+                description: "Execute any tool by name with the provided arguments.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Name of the tool to execute"
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments to pass to the tool"
+                        }
+                    },
+                    "required": ["tool_name", "arguments"]
+                }),
+            },
+        ]
+    }
+
+    /// Build system prompt for compact mode
+    fn build_compact_mode_system_prompt(&self) -> String {
+        r#"You are an AI system administrator with access to 138+ system management tools via a compact interface.
 
 CRITICAL RULES:
 1. ALWAYS use tools for system operations - NEVER suggest CLI commands
-2. Call tools using the native tool_call mechanism
-3. You have access to D-Bus (systemd, NetworkManager), OVSDB (OVS), and Netlink (kernel)
+2. Use the 4 meta-tools to discover and execute the actual tools:
+   - list_tools() - Browse available tools by category
+   - search_tools(query) - Find tools by keyword
+   - get_tool_schema(tool_name) - Get input schema before executing
+   - execute_tool(tool_name, arguments) - Execute any tool
 
-"#);
+WORKFLOW:
+1. If you don't know which tool to use, call list_tools() or search_tools()
+2. Once you find the right tool, call get_tool_schema() to see what arguments it needs
+3. Then call execute_tool() with the tool name and arguments
 
-        // Group tools by prefix
-        let mut groups: std::collections::HashMap<&str, Vec<&String>> = std::collections::HashMap::new();
-        for name in tool_names {
-            let prefix = if name.starts_with("ovs_") { "OVS" }
-                else if name.starts_with("dbus_systemd") { "Systemd" }
-                else if name.starts_with("dbus_") { "D-Bus" }
-                else if name.starts_with("file_") { "File" }
-                else if name.starts_with("shell_") { "Shell" }
-                else if name.starts_with("rtnetlink_") { "Network" }
-                else if name.starts_with("openflow_") { "OpenFlow" }
-                else if name.starts_with("agent_") { "Agents" }
-                else { "Other" };
-            groups.entry(prefix).or_default().push(name);
-        }
+AVAILABLE TOOL CATEGORIES:
+- **OVS**: Open vSwitch management (ovs_list_bridges, ovs_add_port, etc.)
+- **Systemd**: Service management via D-Bus (dbus_systemd_restart_unit, etc.)
+- **D-Bus**: Direct D-Bus calls (dbus_call, dbus_introspect, etc.)
+- **File**: File operations (file_read, file_write, file_list, etc.)
+- **Shell**: Command execution (shell_exec, shell_which, etc.)
+- **Network**: Kernel networking via rtnetlink (rtnetlink_list_links, etc.)
+- **OpenFlow**: OpenFlow rule management (openflow_add_flow, etc.)
+- **Agent**: AI agent operations (agent_spawn, agent_list, etc.)
 
-        prompt.push_str("AVAILABLE TOOLS:\n");
-        for (group, tools) in groups.iter() {
-            prompt.push_str(&format!("\n## {} ({} tools)\n", group, tools.len()));
-            for tool in tools.iter().take(10) {
-                prompt.push_str(&format!("- {}\n", tool));
-            }
-            if tools.len() > 10 {
-                prompt.push_str(&format!("  ... and {} more\n", tools.len() - 10));
-            }
-        }
+SPECIAL AGENTS (ALWAYS AVAILABLE):
+The following specialized agents are pre-loaded. Use them for complex tasks in their domain. NO need to check availability:
+- agent_rust_pro: Rust development (build, check, test, fix)
+- agent_backend_architect: System architecture design
+- agent_network_engineer: Complex network diagnostics and routing
+- agent_context_manager: Session context and memory management
 
-        prompt.push_str(r#"
+IMPORTANT: Only call these agents if the user request matches their expertise. If the request is unrelated (e.g., "list files" does not require backend-architect), simply use the standard tools or ignore the agents.
+
 EXAMPLES:
-- "List OVS bridges" → call ovs_list_bridges({})
-- "Restart nginx" → call dbus_systemd_restart_unit({"unit": "nginx.service"})
-- "Read /etc/hosts" → call file_read({"path": "/etc/hosts"})
+User: "List all OVS bridges"
+1. search_tools({"query": "bridge"})  → Find ovs_list_bridges
+2. execute_tool({"tool_name": "ovs_list_bridges", "arguments": {}})
 
-When asked to do something, USE THE TOOLS. Explain what you're doing briefly.
-"#);
+User: "Restart nginx"
+1. search_tools({"query": "restart"})  → Find dbus_systemd_restart_unit
+2. get_tool_schema({"tool_name": "dbus_systemd_restart_unit"})  → See it needs "unit" param
+3. execute_tool({"tool_name": "dbus_systemd_restart_unit", "arguments": {"unit": "nginx.service"}})
 
-        prompt
+User: "What tools are available for networking?"
+1. list_tools({"category": "network"})  → Browse network tools
+
+REMEMBER: You have access to D-Bus (systemd, NetworkManager), OVSDB (OVS), and Netlink (kernel) - all via native protocols, not CLI.
+"#.to_string()
     }
+
+
 
     /// Format results for display
     fn format_results(&self, llm_text: &str, results: &[ToolResult], forbidden: &[String]) -> String {

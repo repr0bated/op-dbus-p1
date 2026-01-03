@@ -17,6 +17,7 @@
 //! - resources/list → serve embedded docs
 //! - resources/read → serve embedded docs
 
+pub mod compact;
 pub mod protocol;
 pub mod resources;
 pub mod sse;

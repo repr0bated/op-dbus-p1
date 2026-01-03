@@ -60,7 +60,7 @@ use op_agents::agents::{
     },
     mobile::{FlutterExpertAgent, IOSDeveloperAgent, MobileDeveloperAgent},
     operations::{DevOpsTroubleshooterAgent, IncidentResponderAgent, TestAutomatorAgent},
-    orchestration::{ContextManagerAgent, DxOptimizerAgent, TddOrchestratorAgent},
+    orchestration::{ContextManagerAgent, DxOptimizerAgent, TddOrchestratorAgent, MemoryAgent, SequentialThinkingAgent},
     security::{
         BackendSecurityCoderAgent, FrontendSecurityCoderAgent, MobileSecurityCoderAgent,
     },
@@ -144,6 +144,8 @@ fn build_agent(agent_type: &str, agent_id: String) -> Option<Box<dyn AgentTrait>
         "test-automator" => Some(Box::new(TestAutomatorAgent::new(agent_id))),
         // Orchestration agents
         "context-manager" => Some(Box::new(ContextManagerAgent::new(agent_id))),
+        "memory" => Some(Box::new(MemoryAgent::new(agent_id))),
+        "sequential-thinking" => Some(Box::new(SequentialThinkingAgent::new(agent_id))),
         "dx-optimizer" => Some(Box::new(DxOptimizerAgent::new(agent_id))),
         "tdd-orchestrator" => Some(Box::new(TddOrchestratorAgent::new(agent_id))),
         // Security agents

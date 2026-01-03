@@ -17,10 +17,11 @@ pub mod dynamic_loading;
 
 // State plugins - each manages a specific domain
 pub mod state_plugins;
+pub mod default_registry;
 
 pub use auto_create::AutoPluginFactory;
 pub use plugin::{Plugin, PluginCapabilities, PluginContext, PluginMetadata};
-pub use registry::PluginRegistry;
+pub use default_registry::{DefaultPluginRegistry, PluginRegistryConfig};
 pub use state::{ChangeOperation, DesiredState, StateChange, ValidationResult};
 
 /// Prelude for convenient imports

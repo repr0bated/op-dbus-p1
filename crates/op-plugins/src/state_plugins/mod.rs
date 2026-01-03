@@ -7,6 +7,7 @@ pub mod full_system;
 pub mod keyring;
 pub mod login1;
 pub mod lxc;
+pub mod mcp;
 pub mod net;
 pub mod netmaker;
 pub mod openflow;
@@ -24,7 +25,9 @@ pub use dnsresolver::DnsResolverPlugin;
 pub use full_system::FullSystemPlugin;
 pub use login1::Login1Plugin;
 pub use lxc::LxcPlugin;
+pub use mcp::McpStatePlugin;
 pub use net::NetStatePlugin;
+pub use netmaker::NetmakerPlugin;
 pub use openflow::OpenFlowPlugin;
 pub use openflow_obfuscation::OpenFlowObfuscationPlugin;
 pub use packagekit::PackageKitPlugin;
@@ -34,4 +37,4 @@ pub use privacy_router::PrivacyRouterPlugin;
 pub use sessdecl::SessDeclPlugin;
 pub use systemd::SystemdStatePlugin;
 // pub use systemd_networkd::SystemdNetworkdPlugin; // TODO: Plugin not yet implemented
-pub use netmaker::NetmakerPlugin;
+

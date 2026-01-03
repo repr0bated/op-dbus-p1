@@ -12,8 +12,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 use crate::mcp;
-use crate::mcp_picker;
+use crate::mcp_agents;
 use crate::groups_admin;
+use crate::middleware::security;
 use crate::sse;
 use crate::state::AppState;
 use crate::websocket;
@@ -41,6 +42,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/chat", post(handlers::chat::chat_handler))
         .route("/chat/stream", post(handlers::chat::chat_stream_handler))
         .route("/chat/history/:session_id", get(handlers::chat::get_history_handler))
+        .route("/chat/transcript", post(handlers::chat::save_transcript_handler))
         // Tool endpoints
         .route("/tools", get(handlers::tools::list_tools_handler))
         .route("/tools/:name", get(handlers::tools::get_tool_handler))
@@ -63,9 +65,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/llm/provider", post(handlers::llm::switch_provider_handler))
         .route("/llm/model", post(handlers::llm::switch_model_handler))
         // MCP discovery endpoints
-        .route("/mcp/_discover", get(mcp::discover_handler))
         .route("/mcp/_config", get(mcp::config_handler))
-        .route("/mcp/_config/claude", get(mcp::claude_config_handler))
         // SSE events
         .route("/events", get(sse::sse_handler))
         // Privacy router endpoints
@@ -79,6 +79,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let mcp_route = Router::new()
         .nest("/mcp", mcp::create_mcp_router(state.clone()));
 
+    // Critical Agents MCP endpoint (SSE-based, direct tool access)
+    let agents_mcp_route = mcp_agents::CriticalAgentsMcp::new().router();
+
     // WebSocket route
     let ws_route = Router::new()
         .route("/ws", get(websocket::websocket_handler))
@@ -88,8 +91,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .nest("/api", api_routes)
         .merge(mcp_route)
+        .merge(agents_mcp_route)
         .merge(ws_route)
-        .nest("/mcp-picker", mcp_picker::create_picker_router(state.clone()))
         .nest("/groups-admin", groups_admin::create_groups_admin_router(state.clone()));
 
     // Serve static files (WASM frontend) from an explicit path if configured.
@@ -113,6 +116,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     }
 
     router
+        .layer(axum::middleware::from_fn(security::ip_security_middleware))
         .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())

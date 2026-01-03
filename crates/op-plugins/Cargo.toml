@@ -9,6 +9,7 @@ description = "Plugin system with state management, domain plugins, and blockcha
 [dependencies]
 op-core = { path = "../op-core" }
 op-state = { path = "../op-state" }
+op-state-store = { path = "../op-state-store" }
 op-blockchain = { path = "../op-blockchain" }
 op-network = { path = "../op-network" }
 op-dynamic-loader = { path = "../op-dynamic-loader" }

@@ -12,6 +12,7 @@ use op_llm::chat::ChatManager;
 use op_llm::provider::ChatMessage;
 use op_tools::ToolRegistry;
 use op_agents::agent_registry::AgentRegistry;
+use op_state_store::{StateStore, SqliteStore};
 
 use crate::orchestrator::UnifiedOrchestrator;
 use crate::sse::SseEventBroadcaster;
@@ -47,6 +48,8 @@ pub struct AppState {
     pub email_sender: Arc<EmailSender>,
     /// WireGuard server configuration
     pub server_config: WgServerConfig,
+    /// Persistent state store (audit log)
+    pub state_store: Arc<dyn StateStore>,
 }
 
 impl AppState {
@@ -109,17 +112,15 @@ impl AppState {
         let sse_broadcaster = Arc::new(SseEventBroadcaster::new());
 
         // Initialize privacy router components
-        let user_store = Arc::new(
-            UserStore::new("/var/lib/op-dbus/privacy-users.json")
-                .await
-                .unwrap_or_else(|e| {
-                    warn!("Failed to load user store: {}, creating new", e);
-                    // Create empty store
-                    tokio::runtime::Handle::current()
-                        .block_on(UserStore::new("/var/lib/op-dbus/privacy-users.json"))
-                        .expect("Failed to create user store")
-                }),
-        );
+        let user_store = match UserStore::new("/var/lib/op-dbus/privacy-users.json").await {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                warn!("Failed to load user store: {}, creating new", e);
+                // Create empty store
+                Arc::new(UserStore::new("/var/lib/op-dbus/privacy-users.json").await
+                    .expect("Failed to create user store"))
+            }
+        };
 
         let email_config = EmailConfig::from_env().unwrap_or_else(|e| {
             warn!("Failed to load email config: {}", e);
@@ -138,6 +139,18 @@ impl AppState {
         // Load WireGuard server config (will need to be configured properly)
         let server_config = WgServerConfig::default();
 
+        // Initialize State Store
+        let state_store_path = "/var/lib/op-dbus/state.db";
+        let state_store: Arc<dyn StateStore> = match SqliteStore::new(state_store_path).await {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                warn!("Failed to initialize state store at {}: {}, using in-memory", state_store_path, e);
+                // Fallback to in-memory if file access fails
+                Arc::new(SqliteStore::new(":memory:").await
+                    .expect("Failed to create in-memory state store"))
+            }
+        };
+
         info!("✅ Application state initialized");
 
         Ok(Self {
@@ -154,6 +167,7 @@ impl AppState {
             user_store,
             email_sender,
             server_config,
+            state_store,
         })
     }
 

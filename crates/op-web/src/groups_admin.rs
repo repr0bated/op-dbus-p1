@@ -919,8 +919,7 @@ const GROUPS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 const config = {
                     mcpServers: {
                         [`op-dbus-${name}`]: {
-                            url: endpoint,
-                            transport: "sse"
+                            url: endpoint
                         }
                     }
                 };

@@ -28,7 +28,7 @@ use crate::agents::{
     },
     mobile::{FlutterExpertAgent, IOSDeveloperAgent, MobileDeveloperAgent},
     operations::{DevOpsTroubleshooterAgent, IncidentResponderAgent, TestAutomatorAgent},
-    orchestration::{ContextManagerAgent, DxOptimizerAgent, TddOrchestratorAgent},
+    orchestration::{ContextManagerAgent, DxOptimizerAgent, TddOrchestratorAgent, MemoryAgent, SequentialThinkingAgent},
     security::{
         BackendSecurityCoderAgent, FrontendSecurityCoderAgent, MobileSecurityCoderAgent,
     },
@@ -139,6 +139,8 @@ pub fn builtin_agent_descriptors() -> Vec<AgentDescriptor> {
         Box::new(ErrorDetectiveAgent::new(agent_id.clone())),
         Box::new(HybridCloudArchitectAgent::new(agent_id.clone())),
         Box::new(LegacyModernizerAgent::new(agent_id.clone())),
+        Box::new(MemoryAgent::new(agent_id.clone())),
+        Box::new(SequentialThinkingAgent::new(agent_id.clone())),
         Box::new(ObservabilityEngineerAgent::new(agent_id.clone())),
         Box::new(QuantAnalystAgent::new(agent_id.clone())),
         Box::new(UIUXDesignerAgent::new(agent_id.clone())),

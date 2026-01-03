@@ -27,8 +27,10 @@
 
 pub mod email;
 pub mod handlers;
+pub mod middleware;
 pub mod mcp;
-pub mod mcp_picker;
+pub mod mcp_compact;
+pub mod mcp_agents;
 pub mod groups_admin;
 pub mod orchestrator;
 pub mod routes;
@@ -38,7 +40,7 @@ pub mod users;
 pub mod websocket;
 pub mod wireguard;
 
-pub use mcp_picker::CUSTOM_PROFILES;
+
 pub use orchestrator::UnifiedOrchestrator;
 pub use state::AppState;
 

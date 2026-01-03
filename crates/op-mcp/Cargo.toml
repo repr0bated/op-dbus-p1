@@ -10,6 +10,10 @@ description = "MCP Protocol Adapter for op-dbus-v2 - thin adapter that delegates
 name = "op-mcp-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "op-mcp-compact-server"
+path = "src/compact_main.rs"
+
 [dependencies]
 op-chat = { workspace = true }
 op-core = { workspace = true }
@@ -29,6 +33,7 @@ chrono = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true, features = ["cors"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.11", features = ["json"], default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4"
