@@ -103,7 +103,31 @@ disaster.md
 # Scripts and tools (development-specific)
 repository_comparison_script.sh
 check_ovs.sh
+*.sh
+gemini-mcp-wrapper.py
 
 # Cursor-specific files
 cursor_tool_listing.md
 .cursorrules
+
+# MCP and environment configuration
+.env.mcp
+.mcp.json
+mcp-configs/
+
+# Documentation artifacts
+AGENTS.md
+CHATBOT-COMPACT-MODE.md
+CLAUDE*.md
+FINAL-SUMMARY.md
+FUNCTIONALITY-GAP-ANALYSIS.md
+MCP-PLUGIN-INTEGRATION-COMPLETE.md
+MCP-SECURITY-ARCHITECTURE.md
+TODO.md
+
+# Backup and extracted files
+claude-backup-mapping.json
+claude-extracted/
+
+# Service files
+op-agent-deployment-engineer.service
