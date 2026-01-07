@@ -1,10 +1,9 @@
 [package]
 name = "op-mcp"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description = "MCP Protocol Adapter for op-dbus-v2 - thin adapter that delegates to op-chat"
+version = "0.2.0"
+edition = "2021"
+description = "MCP (Model Context Protocol) server for op-dbus"
+license = "MIT"
 
 [[bin]]
 name = "op-mcp-server"
@@ -14,26 +13,36 @@ path = "src/main.rs"
 name = "op-mcp-compact-server"
 path = "src/compact_main.rs"
 
+[[bin]]
+name = "op-mcp-agents-server"
+path = "src/agents_main.rs"
+
+[lib]
+name = "op_mcp"
+path = "src/lib.rs"
+
 [dependencies]
-op-chat = { workspace = true }
-op-core = { workspace = true }
-op-agents = { workspace = true }
-op-tools = { workspace = true }
+op-core = { path = "../op-core" }
+op-tools = { path = "../op-tools" }
+op-introspection = { path = "../op-introspection" }
+op-chat = { path = "../op-chat" }
 op-mcp-aggregator = { path = "../op-mcp-aggregator" }
-tokio = { workspace = true, features = ["full", "signal"] }
-futures = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-uuid = { workspace = true, features = ["v4"] }
-chrono = { workspace = true }
-axum = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
+op-agents = { path = "../op-agents" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full", "sync", "rt-multi-thread", "macros"] }
+tracing = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-reqwest = { version = "0.11", features = ["json"], default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.11", features = ["json"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

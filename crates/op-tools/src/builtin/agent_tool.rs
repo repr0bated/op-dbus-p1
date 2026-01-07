@@ -88,6 +88,33 @@ impl Tool for AgentTool {
     }
 
     fn input_schema(&self) -> Value {
+        // Special schema for sequential_thinking to satisfy Gemini requirements
+        if self.agent_name == "sequential_thinking" || self.agent_name == "sequential-thinking" {
+            return serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "The current thought or reasoning step"
+                    },
+                    "operation": {
+                        "type": "string",
+                        "description": "Operation to perform",
+                        "enum": ["think", "plan", "analyze", "conclude"]
+                    },
+                    "step": {
+                        "type": "integer",
+                        "description": "Current step number"
+                    },
+                    "total_steps": {
+                        "type": "integer",
+                        "description": "Total estimated steps"
+                    }
+                },
+                "required": ["thought", "operation", "step", "total_steps"]
+            });
+        }
+
         if self.operations.is_empty() {
             return serde_json::json!({
                 "type": "object",
@@ -132,14 +159,26 @@ impl Tool for AgentTool {
     async fn execute(&self, input: Value) -> Result<Value> {
         // Handle special case for sequential_thinking agent - accept "thought" as operation content
         let (operation, args) = if self.agent_name == "sequential_thinking" || self.agent_name == "sequential-thinking" {
-            if let Some(thought) = input.get("thought").and_then(|v| v.as_str()) {
-                // Treat "thought" field as a "think" operation with the thought as content
-                ("think".to_string(), Some(serde_json::json!({"thought": thought})))
-            } else if let Some(op) = input.get("operation").and_then(|v| v.as_str()) {
-                (op.to_string(), input.get("args").cloned())
-            } else {
-                return Err(anyhow::anyhow!("Missing required field: operation or thought"));
+            // Extract fields regardless of how they are passed
+            let thought = input.get("thought").and_then(|v| v.as_str());
+            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("think");
+            let step = input.get("step").and_then(|v| v.as_u64());
+            let total_steps = input.get("total_steps").and_then(|v| v.as_u64());
+
+            // Build args object
+            let mut args_map = serde_json::Map::new();
+            if let Some(t) = thought { args_map.insert("thought".to_string(), serde_json::Value::String(t.to_string())); }
+            if let Some(s) = step { args_map.insert("step".to_string(), serde_json::json!(s)); }
+            if let Some(ts) = total_steps { args_map.insert("total_steps".to_string(), serde_json::json!(ts)); }
+            
+            // Merge explicit args if present
+            if let Some(explicit_args) = input.get("args").and_then(|v| v.as_object()) {
+                for (k, v) in explicit_args {
+                    args_map.insert(k.clone(), v.clone());
+                }
             }
+
+            (op.to_string(), Some(serde_json::Value::Object(args_map)))
         } else {
             let op = input
                 .get("operation")
@@ -172,7 +211,7 @@ impl Tool for AgentTool {
         );
 
         self.executor
-            .execute_operation(agent_name, operation, path, args)
+            .execute_operation(agent_name, &operation, path, args)
             .await
     }
 
