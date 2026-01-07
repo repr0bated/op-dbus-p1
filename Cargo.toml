@@ -26,6 +26,7 @@ members = [
     "crates/op-mcp-aggregator",
     "crates/op-execution-tracker",
     "crates/op-dynamic-loader",
+    "streaming-logs",
 ]
 
 [workspace.package]

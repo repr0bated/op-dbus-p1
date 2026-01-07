@@ -129,10 +129,29 @@ async fn mcp_handler(
 }
 
 /// SSE endpoint for MCP connections
-async fn mcp_sse_handler() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn mcp_sse_handler(
+    headers: axum::http::HeaderMap,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = GLOBAL_BROADCASTER.subscribe();
 
     info!("SSE client connected");
+
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+
+    let post_url = format!("{}://{}/mcp/message", scheme, host);
+    
+    // Initial endpoint event
+    let endpoint_event = Event::default()
+        .event("endpoint")
+        .data(&post_url);
 
     let stream = BroadcastStream::new(rx).filter_map(|result| {
         match result {
@@ -140,8 +159,12 @@ async fn mcp_sse_handler() -> Sse<impl Stream<Item = Result<Event, Infallible>>>
             Err(_) => None, // Skip lagged messages
         }
     });
+    
+    // Combine initial event with broadcast stream
+    let combined_stream = stream::once(async move { Ok(endpoint_event) })
+        .chain(stream);
 
-    Sse::new(stream).keep_alive(
+    Sse::new(combined_stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(std::time::Duration::from_secs(15))
             .text("ping"),

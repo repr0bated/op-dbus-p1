@@ -92,3 +92,6 @@ OVSDB_SOCKET=/var/run/openvswitch/db.sock
 
 # Netmaker socket
 NETMAKER_SOCKET=/var/run/netclient/netclient.sock
+
+# Trusted Networks (comma-separated IPs or prefixes)
+OP_TRUSTED_NETWORKS=97.164.68.139
