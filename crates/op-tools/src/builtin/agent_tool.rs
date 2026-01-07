@@ -130,21 +130,36 @@ impl Tool for AgentTool {
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
-        let operation = input
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing required field: operation"))?;
+        // Handle special case for sequential_thinking agent - accept "thought" as operation content
+        let (operation, args) = if self.agent_name == "sequential_thinking" || self.agent_name == "sequential-thinking" {
+            if let Some(thought) = input.get("thought").and_then(|v| v.as_str()) {
+                // Treat "thought" field as a "think" operation with the thought as content
+                ("think".to_string(), Some(serde_json::json!({"thought": thought})))
+            } else if let Some(op) = input.get("operation").and_then(|v| v.as_str()) {
+                (op.to_string(), input.get("args").cloned())
+            } else {
+                return Err(anyhow::anyhow!("Missing required field: operation or thought"));
+            }
+        } else {
+            let op = input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing required field: operation"))?;
+            (op.to_string(), input.get("args").cloned())
+        };
 
-        if !self.operations.is_empty() && !self.operations.contains(&operation.to_string()) {
-            return Err(anyhow::anyhow!(
-                "Unknown operation: {}. Valid operations: {:?}",
-                operation,
-                self.operations
-            ));
+        if !self.operations.is_empty() && !self.operations.contains(&operation) {
+            // For sequential_thinking, accept "think" even if not in operations list
+            if !(self.agent_name.contains("sequential_thinking") && operation == "think") {
+                return Err(anyhow::anyhow!(
+                    "Unknown operation: {}. Valid operations: {:?}",
+                    operation,
+                    self.operations
+                ));
+            }
         }
 
         let path = input.get("path").and_then(|v| v.as_str());
-        let args = input.get("args").cloned();
 
         // Extract agent name from tool name (remove "agent_" prefix)
         let agent_name = self.name.strip_prefix("agent_").unwrap_or(&self.name);

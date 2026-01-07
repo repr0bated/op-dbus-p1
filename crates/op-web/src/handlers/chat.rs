@@ -4,15 +4,17 @@ use axum::{
     extract::{Path, State},
     response::{Json, sse::{Event, Sse}},
 };
-use futures::stream::{self, Stream};
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::convert::Infallible;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{info, error};
 
 use crate::state::AppState;
+use crate::orchestrator::OrchestratorEvent;
 
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
@@ -34,7 +36,7 @@ pub struct ChatResponse {
     pub provider: String,
 }
 
-/// POST /api/chat - Main chat endpoint
+/// POST /api/chat - Main chat endpoint (Blocking)
 pub async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
@@ -50,12 +52,13 @@ pub async fn chat_handler(
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    match state
-        .orchestrator
-        .process(&session_id, &request.message)
-        .await
-    {
-        Ok(result) => {
+    // Pass None for event_tx to disable streaming
+    // Wrap in timeout to ensure we return an error if it takes too long
+    match tokio::time::timeout(
+        Duration::from_secs(290), 
+        state.orchestrator.process(&session_id, &request.message, None)
+    ).await {
+        Ok(Ok(result)) => {
             let provider = state.chat_manager.current_provider().await;
             let model = state.chat_manager.current_model().await;
             Json(ChatResponse {
@@ -64,11 +67,11 @@ pub async fn chat_handler(
                 error: None,
                 tools_executed: result.tools_executed,
                 session_id,
-            model,
-            provider: provider.to_string(),
-        })
+                model,
+                provider: provider.to_string(),
+            })
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!("Chat processing failed: {}", e);
             let provider = state.chat_manager.current_provider().await;
             let model = state.chat_manager.current_model().await;
@@ -76,6 +79,20 @@ pub async fn chat_handler(
                 success: false,
                 message: None,
                 error: Some(e.to_string()),
+                tools_executed: vec![],
+                session_id,
+                model,
+                provider: provider.to_string(),
+            })
+        }
+        Err(_) => {
+            error!("Chat processing timed out after 290s");
+            let provider = state.chat_manager.current_provider().await;
+            let model = state.chat_manager.current_model().await;
+            Json(ChatResponse {
+                success: false,
+                message: None,
+                error: Some("Request timed out internally after 290 seconds. The task may still be running in the background.".to_string()),
                 tools_executed: vec![],
                 session_id,
                 model,
@@ -98,27 +115,41 @@ pub async fn chat_stream_handler(
     let orchestrator = state.orchestrator.clone();
     let message = request.message.clone();
 
-    let stream = stream::unfold(
-        (orchestrator, session_id, message, false),
-        |(orch, sid, msg, done)| async move {
-            if done {
-                return None;
-            }
+    // Create channel for streaming events
+    let (tx, mut rx) = mpsc::channel(100);
 
-            match orch.process(&sid, &msg).await {
-                Ok(result) => {
-                    let event = Event::default()
-                        .data(serde_json::to_string(&result).unwrap_or_default());
-                    Some((Ok(event), (orch, sid, msg, true)))
-                }
-                Err(e) => {
-                    let event = Event::default()
-                        .data(json!({"error": e.to_string()}).to_string());
-                    Some((Ok(event), (orch, sid, msg, true)))
-                }
+    // Spawn orchestrator task
+    tokio::spawn(async move {
+        // Run process with the sender
+        // We ignore the result here because it's streamed via events
+        // The final event could be a "Finished" event if we wanted, 
+        // but currently we stream intermediate steps.
+        // We could emit a final event with the full response if needed.
+        let result = orchestrator.process(&session_id, &message, Some(tx.clone())).await;
+        
+        // Send final result or error using dedicated event types
+        match result {
+            Ok(response) => {
+                let _ = tx.send(OrchestratorEvent::Finished {
+                    success: response.success,
+                    message: response.message,
+                    tools_executed: response.tools_executed,
+                }).await;
             }
-        },
-    );
+            Err(e) => {
+                let _ = tx.send(OrchestratorEvent::Error {
+                    message: e.to_string(),
+                }).await;
+            }
+        }
+    });
+
+    // Create stream from receiver
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            yield Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()));
+        }
+    };
 
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -232,12 +263,14 @@ async fn save_transcript_to_file(history: &[op_llm::ChatMessage], filename: &str
     let mut transcript = String::new();
 
     if let Some(session) = session_id {
-        transcript.push_str(&format!("Chat Transcript - Session: {}\n", session));
+        transcript.push_str(&format!("Chat Transcript - Session: {}
+", session));
     } else {
         transcript.push_str("Chat Transcript\n");
     }
 
-    transcript.push_str(&format!("Generated: {}\n", chrono::Utc::now().to_rfc3339()));
+    transcript.push_str(&format!("Generated: {}
+", chrono::Utc::now().to_rfc3339()));
     transcript.push_str(&"=".repeat(50));
     transcript.push_str("\n\n");
 
@@ -248,7 +281,8 @@ async fn save_transcript_to_file(history: &[op_llm::ChatMessage], filename: &str
             "system" => "⚙️ System",
             _ => "Unknown",
         };
-        transcript.push_str(&format!("[{}] {}\n\n", role, message.content));
+        transcript.push_str(&format!("[{}] {}
+\n", role, message.content));
         if i < history.len() - 1 {
             let separator = "─".repeat(30);
             transcript.push_str(&separator);

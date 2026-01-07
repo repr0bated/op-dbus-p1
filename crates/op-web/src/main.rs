@@ -5,15 +5,20 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{FmtSubscriber, EnvFilter};
 
 use op_web::routes;
 use op_web::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize logging with environment filter (RUST_LOG)
+    // Default to info if not set
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
     let _ = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(filter)
         .with_target(false)
         .with_thread_ids(false)
         .compact()

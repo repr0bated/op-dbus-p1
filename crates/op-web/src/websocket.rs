@@ -1,4 +1,7 @@
 //! WebSocket Handler for Real-time Chat
+//!
+//! Session-isolated WebSocket connections. Each connection only receives
+//! events for its own session, preventing cross-session information leakage.
 
 use axum::{
     extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
@@ -7,16 +10,19 @@ use axum::{
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{info, error, debug};
 
 use op_llm::provider::ChatMessage;
 use crate::state::AppState;
+use crate::orchestrator::OrchestratorEvent;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsMessage {
     Chat { message: String, session_id: Option<String> },
     Response { success: bool, message: String, tools_executed: Vec<String> },
+    Event { data: OrchestratorEvent },
     System { message: String },
     Error { message: String },
     Ping,
@@ -32,13 +38,14 @@ pub async fn websocket_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
-    let (mut sender, mut receiver) = socket.split();
+    let (mut ws_sender, mut ws_receiver) = socket.split();
 
     let session_id = uuid::Uuid::new_v4().to_string();
     info!("WebSocket connected: {}", &session_id[..8]);
 
-    // Subscribe to broadcast channel
-    let mut broadcast_rx = state.broadcast_tx.subscribe();
+    // Create session-specific channel for outbound messages
+    // This ensures events are only sent to THIS connection, not all connections
+    let (session_tx, mut session_rx) = mpsc::channel::<String>(100);
 
     // Send welcome message
     let welcome = WsMessage::System {
@@ -47,7 +54,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             &session_id[..8]
         ),
     };
-    if let Err(e) = sender.send(Message::Text(serde_json::to_string(&welcome).unwrap())).await {
+    if let Err(e) = ws_sender.send(Message::Text(serde_json::to_string(&welcome).unwrap())).await {
         error!("Failed to send welcome: {}", e);
         return;
     }
@@ -55,11 +62,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Clone for tasks
     let state_clone = state.clone();
     let session_clone = session_id.clone();
+    let session_tx_clone = session_tx.clone();
 
-    // Handle broadcast messages
+    // Task to send messages from session channel to WebSocket
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
-            if sender.send(Message::Text(msg)).await.is_err() {
+        while let Some(msg) = session_rx.recv().await {
+            if ws_sender.send(Message::Text(msg)).await.is_err() {
                 break;
             }
         }
@@ -67,21 +75,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Handle incoming messages
     let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Text(text) => {
                     debug!("WS received: {}", text);
-                    
+
                     // Try to parse as WsMessage
                     let ws_msg: Result<WsMessage, _> = serde_json::from_str(&text);
-                    
+
                     let message_text = match ws_msg {
                         Ok(WsMessage::Chat { message, .. }) => message,
                         Ok(WsMessage::Ping) => {
                             let pong = WsMessage::Pong;
-                            let _ = state_clone.broadcast_tx.send(
+                            let _ = session_tx_clone.send(
                                 serde_json::to_string(&pong).unwrap()
-                            );
+                            ).await;
                             continue;
                         }
                         _ => text.clone(), // Treat as plain text
@@ -91,8 +99,24 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         continue;
                     }
 
-                    // Process through orchestrator
-                    match state_clone.orchestrator.process(&session_clone, &message_text).await {
+                    // Create channel for streaming orchestrator events
+                    let (event_tx, mut event_rx) = mpsc::channel::<OrchestratorEvent>(100);
+                    let session_tx_for_events = session_tx_clone.clone();
+
+                    // Spawn task to forward orchestrator events to session channel
+                    tokio::spawn(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            let ws_event = WsMessage::Event { data: event };
+                            if let Ok(json) = serde_json::to_string(&ws_event) {
+                                if session_tx_for_events.send(json).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+
+                    // Process through orchestrator with streaming
+                    match state_clone.orchestrator.process(&session_clone, &message_text, Some(event_tx)).await {
                         Ok(result) => {
                             // Store in conversation history
                             {
@@ -109,17 +133,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                 message: result.message,
                                 tools_executed: result.tools_executed,
                             };
-                            let _ = state_clone.broadcast_tx.send(
+                            let _ = session_tx_clone.send(
                                 serde_json::to_string(&response).unwrap()
-                            );
+                            ).await;
                         }
                         Err(e) => {
                             let error = WsMessage::Error {
                                 message: e.to_string(),
                             };
-                            let _ = state_clone.broadcast_tx.send(
+                            let _ = session_tx_clone.send(
                                 serde_json::to_string(&error).unwrap()
-                            );
+                            ).await;
                         }
                     }
                 }

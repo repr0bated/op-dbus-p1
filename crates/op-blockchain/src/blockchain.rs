@@ -473,7 +473,7 @@ impl StreamingBlockchain {
     /// Start a footprint receiver that processes incoming footprints
     pub async fn start_footprint_receiver(
         &self,
-        mut receiver: tokio::sync::mpsc::UnboundedReceiver<PluginFootprint>,
+        mut receiver: tokio::sync::mpsc::Receiver<PluginFootprint>,
     ) -> Result<()> {
         info!("Starting blockchain footprint receiver");
 

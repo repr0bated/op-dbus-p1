@@ -3,7 +3,7 @@
 //! Provides MCP-compatible access to core orchestration agents plus
 //! additional requested agents.
 
-use axum::{
+use axum::{routing::{get, post},
     extract::{Json, State},
     http::{HeaderMap, StatusCode},
     response::{
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use op_agents::Agent;
+use op_agents::agents::base::{AgentTrait as Agent, AgentTask};
 use op_agents::agents::orchestration::context_manager::ContextManagerAgent;
 use op_agents::agents::orchestration::memory::MemoryAgent;
 use op_agents::agents::orchestration::sequential_thinking::SequentialThinkingAgent;
@@ -111,15 +111,15 @@ impl CriticalAgentsState {
     pub fn get_tools(&self) -> Vec<Value> {
         let mut tools = Vec::new();
         for agent in &self.agents {
-            let info = agent.info();
-            let agent_name = &info.name;
-            for op in &info.operations {
+            let agent_name = agent.name();
+            let agent_description = agent.description();
+            for op in agent.operations() {
                 let tool_name = format!("{}_{}", agent_name, op);
-                let description = format!("{} - {}", info.description, op);
+                let description = format!("{} - {}", agent_description, op);
                 tools.push(json!({
                     "name": tool_name,
                     "description": description,
-                    "inputSchema": self.get_operation_schema(agent_name, op)
+                    "inputSchema": self.get_operation_schema(agent_name, &op)
                 }));
             }
         }
@@ -333,9 +333,8 @@ impl CriticalAgentsState {
 
     pub fn find_agent(&self, tool_name: &str) -> Option<(&Arc<dyn Agent + Send + Sync>, String)> {
         for agent in &self.agents {
-            let info = agent.info();
-            let agent_name = &info.name;
-            for op in &info.operations {
+            let agent_name = agent.name();
+            for op in agent.operations() {
                 let expected_tool = format!("{}_{}", agent_name, op);
                 if expected_tool == tool_name {
                     return Some((agent, op.clone()));
@@ -368,6 +367,14 @@ impl Default for AgentsMcpState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn create_router() -> axum::Router {
+    let state = Arc::new(AgentsMcpState::new());
+    axum::Router::new()
+        .route("/mcp/agents", get(mcp_agents_sse_handler))
+        .route("/mcp/agents/message", post(mcp_agents_message_handler))
+        .with_state(state)
 }
 
 pub async fn mcp_agents_sse_handler(
@@ -518,8 +525,7 @@ async fn handle_tools_call(
     
     let agent_type = tool_name.split('_').next().unwrap_or(tool_name);
     
-    let task = op_agents::Task {
-        id: format!("mcp-{}", uuid::Uuid::new_v4()),
+    let task = AgentTask {
         task_type: agent_type.to_string(),
         operation: operation.clone(),
         path: arguments.get("path").and_then(|p| p.as_str()).map(String::from),

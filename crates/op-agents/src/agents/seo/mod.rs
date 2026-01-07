@@ -3,7 +3,7 @@
 //! Specialized agents for SEO optimization and content marketing
 
 mod content_marketer;
-mod search_specialist;
+pub mod search_specialist;
 mod seo_content_writer;
 mod seo_keyword_strategist;
 mod seo_meta_optimizer;

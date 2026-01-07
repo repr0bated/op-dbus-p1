@@ -13,6 +13,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use op_llm::chat::ChatManager;
@@ -33,6 +34,17 @@ const FORBIDDEN_COMMANDS: &[&str] = &[
     // Container CLI - use lxc_* tools instead
     "docker ", "kubectl", "lxc ",
 ];
+
+/// Events emitted during orchestration for real-time streaming
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OrchestratorEvent {
+    Thinking,
+    ToolExecution { name: String, args: Value },
+    ToolResult { name: String, success: bool, result: Option<Value>, error: Option<String> },
+    Finished { success: bool, message: String, tools_executed: Vec<String> },
+    Error { message: String },
+}
 
 /// Response from tool execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,9 +106,15 @@ impl UnifiedOrchestrator {
         &self,
         _session_id: &str,
         input: &str,
+        event_tx: Option<mpsc::Sender<OrchestratorEvent>>,
     ) -> Result<OrchestratorResponse> {
         let input_trimmed = input.trim();
-        info!("Processing: {}", input_trimmed);
+        let input_preview = if input_trimmed.len() > 80 {
+            format!("{}...", &input_trimmed[..80])
+        } else {
+            input_trimmed.to_string()
+        };
+        info!("📩 User request: \"{}\"", input_preview);
 
         // Handle special commands
         match input_trimmed.to_lowercase().as_str() {
@@ -112,27 +130,60 @@ impl UnifiedOrchestrator {
         }
 
         // Natural language → LLM with tools
-        self.process_with_llm(input_trimmed).await
+        self.process_with_llm(input_trimmed, event_tx).await
     }
 
     /// Process through LLM with tool calling (multi-turn)
-    async fn process_with_llm(&self, input: &str) -> Result<OrchestratorResponse> {
+    async fn process_with_llm(
+        &self, 
+        input: &str, 
+        event_tx: Option<mpsc::Sender<OrchestratorEvent>>
+    ) -> Result<OrchestratorResponse> {
         const MAX_TURNS: usize = 50; // Allow complex multi-step tasks to complete
         
         // Use compact mode - only expose 4 meta-tools
         let tool_defs = self.build_compact_mode_tools();
-        
-        info!("LLM using compact mode with {} meta-tools", tool_defs.len());
 
-        // Build system prompt for compact mode
-        let system_prompt = self.build_compact_mode_system_prompt();
+        // Fetch all tools to populate the context
+        let available_tools = self.tool_registry.list().await;
+
+        info!("🤖 Chatbot starting conversation ({} tools available)", available_tools.len());
+        let tool_list_context = available_tools.iter()
+            .map(|t| format!("- {}: {}", t.name, t.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Build system prompt: Capabilities + Compact Instructions + Tool Directory
+        let system_msg_core = op_chat::system_prompt::generate_system_prompt().await;
+        let compact_instructions = self.build_compact_mode_system_prompt();
+        
+        let combined_prompt = format!("{}\n\n== INTERFACE MODE: COMPACT ==\n{}\n\n## GLOBAL TOOL DIRECTORY\nThe following tools are available via execute_tool():\n\n{}", 
+            system_msg_core.content, 
+            compact_instructions,
+            tool_list_context
+        );
+
+        // Convert role (default to system)
+        let role_str = match system_msg_core.role {
+            op_core::types::ChatRole::User => "user",
+            op_core::types::ChatRole::Assistant => "assistant",
+            op_core::types::ChatRole::System => "system",
+            op_core::types::ChatRole::Tool => "tool",
+        }.to_string();
+
+        let system_msg = ChatMessage {
+            role: role_str,
+            content: combined_prompt,
+            tool_calls: None,
+            tool_call_id: None,
+        };
 
         // Get model
         let model = self.chat_manager.current_model().await;
 
         // Initialize conversation
         let mut messages = vec![
-            ChatMessage::system(&system_prompt),
+            system_msg,
             ChatMessage::user(input),
         ];
 
@@ -148,10 +199,15 @@ impl UnifiedOrchestrator {
             // Check if we're on the last turn - force completion
             let is_last_turn = turn == MAX_TURNS - 1;
             if is_last_turn {
-                info!("Turn {}: FINAL TURN - will return results after this", turn + 1);
+                info!("⚠️  Step {}: Final step - chatbot will respond after this", turn + 1);
             }
+
+            info!("🧠 Step {}: Chatbot is thinking...", turn + 1);
             
-            info!("Turn {}: calling LLM with {} messages", turn + 1, messages.len());
+            // Emit Thinking event
+            if let Some(tx) = &event_tx {
+                let _ = tx.send(OrchestratorEvent::Thinking).await;
+            }
 
             // Build request
             let request = ChatRequest {
@@ -163,13 +219,45 @@ impl UnifiedOrchestrator {
                 top_p: None,
             };
 
-            // Call LLM
-            let response = self.chat_manager
-                .chat_with_request(&model, request)
-                .await
-                .context("LLM request failed")?;
+            // Call LLM with timeout (60 seconds per turn) and heartbeat
+            let llm_future = self.chat_manager.chat_with_request(&model, request);
 
-            debug!("Turn {} response: {:?}", turn + 1, response.message.content);
+            // Spawn heartbeat task to send Thinking events every 10s during LLM call
+            let heartbeat_tx = event_tx.clone();
+            let heartbeat_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                interval.tick().await; // Skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    if let Some(ref tx) = heartbeat_tx {
+                        if tx.send(OrchestratorEvent::Thinking).await.is_err() {
+                            break; // Channel closed
+                        }
+                    }
+                }
+            });
+
+            let response = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                llm_future
+            ).await {
+                Ok(Ok(resp)) => {
+                    heartbeat_handle.abort();
+                    resp
+                }
+                Ok(Err(e)) => {
+                    heartbeat_handle.abort();
+                    error!("❌ Step {}: Chatbot encountered an error: {}", turn + 1, e);
+                    return Err(anyhow::anyhow!("Chatbot error at step {}: {}", turn + 1, e));
+                }
+                Err(_) => {
+                    heartbeat_handle.abort();
+                    error!("⏱️  Step {}: Chatbot timed out after 60 seconds", turn + 1);
+                    return Err(anyhow::anyhow!("Chatbot timed out at step {} (60s limit)", turn + 1));
+                }
+            };
+
+            debug!("Step {} raw response: {:?}", turn + 1, response.message.content);
 
             // Check for forbidden CLI commands
             let forbidden = self.detect_forbidden_commands(&response.message.content);
@@ -205,12 +293,13 @@ impl UnifiedOrchestrator {
             // If no tool calls, we're done - this is the final response
             if turn_tools.is_empty() {
                 final_response_text = response.message.content.clone();
-                info!("Turn {}: no tool calls, finishing", turn + 1);
+                info!("💬 Step {}: Chatbot is ready to respond", turn + 1);
                 break;
             }
 
             // Execute all tool calls for this turn
-            info!("Turn {}: executing {} tools", turn + 1, turn_tools.len());
+            let tool_names: Vec<&str> = turn_tools.iter().map(|(n, _)| n.as_str()).collect();
+            info!("🔧 Step {}: Chatbot is calling {} tool(s): {}", turn + 1, turn_tools.len(), tool_names.join(", "));
             
             // Add assistant message with tool calls
             let tool_call_summary: Vec<String> = turn_tools.iter()
@@ -226,8 +315,18 @@ impl UnifiedOrchestrator {
             let mut response_message: Option<String> = None;
 
             for (name, args) in turn_tools {
-                info!("Executing tool: {} with args: {}", name, args);
+                // Format a human-readable description of what the tool does
+                let tool_desc = self.describe_tool_call(&name, &args);
+                info!("   → {}", tool_desc);
                 all_tools.push(name.clone());
+                
+                // Emit ToolExecution event
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(OrchestratorEvent::ToolExecution { 
+                        name: name.clone(), 
+                        args: args.clone() 
+                    }).await;
+                }
 
                 // Check if this is a response tool - these signal completion
                 if name == "respond_to_user" || name == "cannot_perform" || name == "request_clarification" {
@@ -239,6 +338,16 @@ impl UnifiedOrchestrator {
                 }
 
                 let result = self.execute_tool(&name, args).await;
+                
+                // Emit ToolResult event
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(OrchestratorEvent::ToolResult { 
+                        name: name.clone(),
+                        success: result.success,
+                        result: result.result.clone(),
+                        error: result.error.clone(),
+                    }).await;
+                }
                 
                 // Build result message for LLM
                 if result.success {
@@ -267,7 +376,7 @@ impl UnifiedOrchestrator {
                     final_response_text = msg;
                 }
                 finished_with_response_tool = true;
-                info!("Response tool called, finishing orchestration");
+                info!("💬 Chatbot finished with response tool");
                 break;
             }
 
@@ -737,6 +846,14 @@ User: "What tools are available for networking?"
 1. list_tools({"category": "network"})  → Browse network tools
 
 REMEMBER: You have access to D-Bus (systemd, NetworkManager), OVSDB (OVS), and Netlink (kernel) - all via native protocols, not CLI.
+
+HINT - OVS NETWORKING:
+Creating an OVS bridge (`ovs_create_bridge`) does NOT create a Linux network interface automatically.
+To assign an IP address to a bridge, you MUST add an internal port with the same name (or different name) to the bridge first.
+Example:
+1. `execute_tool("ovs_create_bridge", {"name": "br0"})`
+2. `execute_tool("ovs_add_port", {"bridge": "br0", "port": "br0", "type": "internal"})`
+3. `execute_tool("rtnetlink_add_address", {"interface": "br0", ...})`
 "#.to_string()
     }
 
@@ -1008,5 +1125,109 @@ The AI uses native protocols (D-Bus, OVSDB, Netlink) - never CLI commands."#)
 ✅ Ready for commands"#,
             tools.len(), model, provider
         ))
+    }
+
+    /// Generate a human-readable description of a tool call
+    fn describe_tool_call(&self, name: &str, args: &Value) -> String {
+        match name {
+            "execute_tool" => {
+                let tool_name = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let inner_args = args.get("arguments").cloned().unwrap_or(json!({}));
+                self.describe_actual_tool(tool_name, &inner_args)
+            }
+            "list_tools" => {
+                let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("all");
+                format!("Listing available tools (category: {})", category)
+            }
+            "search_tools" => {
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                format!("Searching for tools matching \"{}\"", query)
+            }
+            "get_tool_schema" => {
+                let tool = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                format!("Getting schema for tool: {}", tool)
+            }
+            _ => format!("Calling {}", name)
+        }
+    }
+
+    /// Generate human-readable description for actual tool execution
+    fn describe_actual_tool(&self, name: &str, args: &Value) -> String {
+        match name {
+            // OVS tools
+            "ovs_list_bridges" => "Listing OVS bridges".to_string(),
+            "ovs_create_bridge" => {
+                let bridge = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Creating OVS bridge '{}'", bridge)
+            }
+            "ovs_delete_bridge" => {
+                let bridge = args.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Deleting OVS bridge '{}'", bridge)
+            }
+            "ovs_add_port" => {
+                let bridge = args.get("bridge").and_then(|v| v.as_str()).unwrap_or("?");
+                let port = args.get("port").and_then(|v| v.as_str()).unwrap_or("?");
+                let port_type = args.get("type").and_then(|v| v.as_str()).unwrap_or("normal");
+                format!("Adding {} port '{}' to bridge '{}'", port_type, port, bridge)
+            }
+            "ovs_list_ports" => {
+                let bridge = args.get("bridge").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Listing ports on bridge '{}'", bridge)
+            }
+            // Systemd tools
+            "dbus_systemd_restart_unit" => {
+                let unit = args.get("unit").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Restarting service '{}'", unit)
+            }
+            "dbus_systemd_start_unit" => {
+                let unit = args.get("unit").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Starting service '{}'", unit)
+            }
+            "dbus_systemd_stop_unit" => {
+                let unit = args.get("unit").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Stopping service '{}'", unit)
+            }
+            "dbus_systemd_get_unit_status" => {
+                let unit = args.get("unit").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Checking status of '{}'", unit)
+            }
+            "dbus_systemd_list_units" => "Listing systemd units".to_string(),
+            // Network tools
+            "rtnetlink_list_links" | "list_network_interfaces" => "Listing network interfaces".to_string(),
+            "rtnetlink_add_address" => {
+                let iface = args.get("interface").and_then(|v| v.as_str()).unwrap_or("?");
+                let addr = args.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Adding IP address {} to interface '{}'", addr, iface)
+            }
+            "rtnetlink_link_up" => {
+                let iface = args.get("interface").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Bringing interface '{}' up", iface)
+            }
+            "rtnetlink_link_down" => {
+                let iface = args.get("interface").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Bringing interface '{}' down", iface)
+            }
+            // File tools
+            "file_read" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Reading file '{}'", path)
+            }
+            "file_write" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("Writing to file '{}'", path)
+            }
+            "file_list" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                format!("Listing files in '{}'", path)
+            }
+            // Shell tools
+            "shell_exec" => {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+                let cmd_preview = if cmd.len() > 50 { format!("{}...", &cmd[..50]) } else { cmd.to_string() };
+                format!("Running command: {}", cmd_preview)
+            }
+            // Default
+            _ => format!("Executing {}", name)
+        }
     }
 }

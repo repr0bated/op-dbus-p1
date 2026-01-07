@@ -80,7 +80,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/mcp", mcp::create_mcp_router(state.clone()));
 
     // Critical Agents MCP endpoint (SSE-based, direct tool access)
-    let agents_mcp_route = mcp_agents::CriticalAgentsMcp::new().router();
+    let agents_mcp_route = mcp_agents::create_router();
 
     // WebSocket route
     let ws_route = Router::new()

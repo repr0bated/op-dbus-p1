@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::{Agent, AgentInfo, Task, TaskResult};
+use crate::agents::base::{AgentTask, AgentTrait, TaskResult};
 
 /// Mem0 wrapper state
 struct Mem0State {
@@ -39,6 +39,7 @@ pub struct Mem0WrapperAgent {
     state: Mutex<Mem0State>,
     python_path: String,
     mem0_dir: String,
+    profile: crate::security::SecurityProfile,
 }
 
 impl Mem0WrapperAgent {
@@ -53,29 +54,40 @@ impl Mem0WrapperAgent {
             state: Mutex::new(Mem0State::default()),
             python_path,
             mem0_dir,
+            profile: crate::security::SecurityProfile::orchestration("mem0", vec!["*"]),
         }
     }
 }
 
 #[async_trait]
-impl Agent for Mem0WrapperAgent {
-    fn info(&self) -> AgentInfo {
-        AgentInfo {
-            name: "mem0".to_string(),
-            description: "Semantic memory using Mem0 (temporarily disabled)".to_string(),
-            version: "0.1.0".to_string(),
-            operations: vec![
-                "add".to_string(),
-                "search".to_string(),
-                "get_all".to_string(),
-                "delete".to_string(),
-                "update".to_string(),
-            ],
-            capabilities: vec!["memory".to_string(), "semantic-search".to_string()],
-        }
+impl AgentTrait for Mem0WrapperAgent {
+    fn agent_type(&self) -> &str {
+        "mem0"
     }
 
-    async fn execute(&self, task: Task) -> Result<TaskResult, String> {
+    fn name(&self) -> &str {
+        "Mem0 Memory Agent"
+    }
+
+    fn description(&self) -> &str {
+        "Semantic memory using Mem0 (temporarily disabled)"
+    }
+
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "add".to_string(),
+            "search".to_string(),
+            "get_all".to_string(),
+            "delete".to_string(),
+            "update".to_string(),
+        ]
+    }
+
+    fn security_profile(&self) -> &crate::security::SecurityProfile {
+        &self.profile
+    }
+
+    async fn execute(&self, task: AgentTask) -> Result<TaskResult, String> {
         // Return graceful "not available" response
         let error_msg = "Mem0 temporarily disabled - pending embedder configuration. \
                          To enable: configure Ollama with nomic-embed-text, or provide OPENAI_API_KEY";
@@ -84,13 +96,12 @@ impl Agent for Mem0WrapperAgent {
         
         Ok(TaskResult {
             success: false,
-            output: json!({
+            operation: task.operation,
+            data: json!({
                 "available": false,
                 "error": error_msg,
-                "operation": task.operation,
                 "hint": "Use memory_remember/memory_recall for key-value memory instead"
-            }),
-            artifacts: vec![],
+            }).to_string(),
             metadata: {
                 let mut m = HashMap::new();
                 m.insert("status".to_string(), json!("disabled"));

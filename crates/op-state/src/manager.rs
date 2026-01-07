@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Type alias for the footprint sender channel
-pub type FootprintSender = tokio::sync::mpsc::UnboundedSender<PluginFootprint>;
+pub type FootprintSender = tokio::sync::mpsc::Sender<PluginFootprint>;
 
 /// Desired state loaded from YAML/JSON
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ impl StateManager {
     fn record_footprint(&self, plugin: &str, operation: &str, data: serde_json::Value) {
         if let Some(tx) = &self.blockchain_sender {
             let footprint = PluginFootprint::new(plugin, operation, &data);
-            if let Err(e) = tx.send(footprint) {
+            if let Err(e) = tx.try_send(footprint) {
                 log::debug!("Failed to send footprint for {}: {}", plugin, e);
             }
         }

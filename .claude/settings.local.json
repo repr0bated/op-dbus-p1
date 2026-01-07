@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sudo cat:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(echo:*)",
+      "Bash(set -a)",
+      "Bash(source /etc/op-dbus/environment)",
+      "Bash(set +a)",
+      "Bash(sudo chmod:*)",
+      "Bash(sudo chown:*)",
+      "Bash(export OP_SELF_REPO_PATH=/home/jeremy/git/op-dbus-v2)",
+      "Bash(sudo systemctl cat:*)",
+      "Bash(ls:*)",
+      "Bash(sudo systemctl edit:*)",
+      "Bash(sudo cp:*)",
+      "Bash(sudo systemctl daemon-reload:*)",
+      "Bash(sudo systemctl restart:*)",
+      "Bash(sudo systemctl status:*)",
+      "Bash(pgrep:*)",
+      "Bash(sudo journalctl:*)",
+      "Bash(cargo build:*)",
+      "Bash(curl:*)",
+      "Bash(cargo test:*)",
+      "Bash(sudo systemctl stop:*)",
+      "Bash(sudo systemctl start:*)",
+      "Bash(sudo netstat:*)",
+      "Bash(sudo ss:*)",
+      "Bash(sudo systemctl list-units:*)",
+      "Bash(sudo grep:*)",
+      "Bash(sudo sed:*)",
+      "Bash(sudo nginx:*)",
+      "Bash(sudo systemctl reload:*)",
+      "Bash(cd:*)",
+      "Bash(sudo systemctl list-unit-files:*)",
+      "Bash(pkill:*)",
+      "Bash(cat:*)",
+      "Bash(dbus-send:*)",
+      "Bash(sudo systemctl kill:*)",
+      "Bash(/usr/local/bin/dbus-agent:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(sudo tail:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo --version:*)",
+      "Bash(find:*)",
+      "Bash(python3:*)"
+    ]
+  },
+  "remote": {
+    "defaultEnvironmentId": "env_011CV5Eiaoq3NxR9BLj99Dtn"
+  }
+}

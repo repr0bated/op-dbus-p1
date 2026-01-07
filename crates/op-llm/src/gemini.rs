@@ -860,9 +860,24 @@ impl LlmProvider for GeminiClient {
                 return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
             }
 
+            // Get raw response text first for debugging
+            let raw_body = response.text().await
+                .context("Failed to read Gemini response body")?;
+
             // Success - parse and return response
-            let result: GeminiResponse = response.json().await
-                .context("Failed to parse Gemini response")?;
+            let result: GeminiResponse = match serde_json::from_str(&raw_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    let preview = if raw_body.len() > 1000 {
+                        format!("{}...[truncated]", &raw_body[..1000])
+                    } else {
+                        raw_body.clone()
+                    };
+                    tracing::error!("Failed to parse Gemini response: {}", e);
+                    tracing::error!("Raw response: {}", preview);
+                    return Err(anyhow::anyhow!("Failed to parse Gemini response: {}. Raw: {}", e, preview));
+                }
+            };
 
             let text = result.candidates.first()
                 .and_then(|c| c.content.parts.first())
@@ -1034,9 +1049,25 @@ impl LlmProvider for GeminiClient {
                 return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
             }
 
+            // Get raw response text first for debugging
+            let raw_body = response.text().await
+                .context("Failed to read Gemini response body")?;
+
             // Parse response
-            let result: GeminiResponse = response.json().await
-                .context("Failed to parse Gemini response")?;
+            let result: GeminiResponse = match serde_json::from_str(&raw_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Log the raw response for debugging
+                    let preview = if raw_body.len() > 1000 {
+                        format!("{}...[truncated]", &raw_body[..1000])
+                    } else {
+                        raw_body.clone()
+                    };
+                    tracing::error!("Failed to parse Gemini response: {}", e);
+                    tracing::error!("Raw response: {}", preview);
+                    return Err(anyhow::anyhow!("Failed to parse Gemini response: {}. Raw: {}", e, preview));
+                }
+            };
 
             // Extract text and function calls
             let mut text = String::new();

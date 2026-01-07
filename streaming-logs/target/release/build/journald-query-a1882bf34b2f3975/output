@@ -1,0 +1,2 @@
+cargo:rustc-link-lib=systemd
+cargo:warning=Using libsystemd via pkg-config

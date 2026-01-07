@@ -192,7 +192,28 @@ impl OvsdbClient {
                 params.push(op.clone());
             }
         }
-        self.rpc_call("transact", json!(params)).await
+        let result = self.rpc_call("transact", json!(params)).await?;
+
+        // Check for per-operation errors in the result array
+        // OVSDB returns an array of results, one per operation
+        // Each result can be an error object like {"error": "...", "details": "..."}
+        if let Some(results) = result.as_array() {
+            for (i, op_result) in results.iter().enumerate() {
+                if let Some(error) = op_result.get("error") {
+                    if let Some(error_str) = error.as_str() {
+                        let details = op_result.get("details")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("no details");
+                        return Err(anyhow::anyhow!(
+                            "OVSDB operation {} failed: {} ({})",
+                            i, error_str, details
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Create OVS bridge

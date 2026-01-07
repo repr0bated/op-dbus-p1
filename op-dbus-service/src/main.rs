@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
     };
 
     // Create footprint channel
-    let (footprint_tx, footprint_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (footprint_tx, footprint_rx) = tokio::sync::mpsc::channel(1000);
 
     // State Manager with blockchain integration
     let mut state_manager = StateManager::new();

@@ -12,7 +12,7 @@ mod data_engineer;
 mod data_scientist;
 mod ml_engineer;
 mod mlops_engineer;
-mod prompt_engineer;
+pub mod prompt_engineer;
 
 pub use ai_engineer::AIEngineerAgent;
 pub use data_engineer::DataEngineerAgent;
