@@ -59,7 +59,10 @@ log_error() {
 
 install_packages() {
     if command -v op-packagekit-install &> /dev/null; then
-        op-packagekit-install "$@"
+        if ! op-packagekit-install "$@"; then
+            log_warn "op-packagekit-install failed, falling back to apt-get"
+            apt-get install -y "$@"
+        fi
         return
     fi
 
