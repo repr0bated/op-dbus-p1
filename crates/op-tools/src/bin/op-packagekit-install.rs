@@ -115,9 +115,20 @@ async fn install_packages(
     )
     .await?;
 
+    let mut finished_stream = tx_proxy.receive_signal("Finished").await?;
+
     let _: () = tx_proxy
         .call("InstallPackages", &(flags, package_ids.to_vec()))
         .await?;
+
+    // Wait for installation to complete
+    if let Some(signal) = finished_stream.next().await {
+        if let Ok((exit_code, _runtime)) = signal.body::<(u32, u32)>() {
+            if exit_code != 1 { // 1 = PK_EXIT_ENUM_SUCCESS
+                anyhow::bail!("Package installation failed with exit code: {}", exit_code);
+            }
+        }
+    }
 
     Ok(())
 }
