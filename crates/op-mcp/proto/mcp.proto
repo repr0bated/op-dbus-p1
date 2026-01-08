@@ -1,118 +1,152 @@
-// MCP gRPC Service Definition
-//
-// Compile with:
-//   protoc --rust_out=src/grpc --grpc_out=src/grpc mcp.proto
-
 syntax = "proto3";
 
-package mcp;
+package op.mcp.v1;
 
-// MCP Service
+// MCP Service - JSON-RPC over gRPC
 service McpService {
-    // Standard MCP methods
-    rpc Initialize(InitializeRequest) returns (InitializeResponse);
-    rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
-    rpc CallTool(CallToolRequest) returns (CallToolResponse);
-    rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
-    rpc ReadResource(ReadResourceRequest) returns (ReadResourceResponse);
-    
-    // Streaming variants
-    rpc StreamTools(ListToolsRequest) returns (stream ToolInfo);
-    rpc StreamCallTool(CallToolRequest) returns (stream CallToolChunk);
+  // Unary request/response (standard MCP calls)
+  rpc Call(McpRequest) returns (McpResponse);
+  
+  // Server streaming for SSE-like behavior
+  rpc Subscribe(SubscribeRequest) returns (stream McpEvent);
+  
+  // Bidirectional streaming for full duplex
+  rpc Stream(stream McpRequest) returns (stream McpResponse);
+  
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+  
+  // Initialize session (run-on-connection agents)
+  rpc Initialize(InitializeRequest) returns (InitializeResponse);
+  
+  // Tool operations
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  rpc CallTool(CallToolRequest) returns (CallToolResponse);
+  rpc CallToolStreaming(CallToolRequest) returns (stream ToolOutput);
 }
 
-// Initialize
+// Generic MCP JSON-RPC request (passthrough)
+message McpRequest {
+  string jsonrpc = 1;  // Always "2.0"
+  optional string id = 2;
+  string method = 3;
+  optional string params_json = 4;  // JSON-encoded params
+}
+
+// Generic MCP JSON-RPC response
+message McpResponse {
+  string jsonrpc = 1;
+  optional string id = 2;
+  optional string result_json = 3;  // JSON-encoded result
+  optional McpError error = 4;
+}
+
+message McpError {
+  int32 code = 1;
+  string message = 2;
+  optional string data_json = 3;
+}
+
+// Subscribe to server events
+message SubscribeRequest {
+  repeated string event_types = 1;  // "tools", "agents", "resources"
+  optional string session_id = 2;
+}
+
+message McpEvent {
+  string event_type = 1;
+  string data_json = 2;
+  int64 timestamp = 3;
+  uint32 sequence = 4;
+}
+
+// Health check
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+  string server_name = 3;
+  ServerMode mode = 4;
+  repeated string connected_agents = 5;
+  uint64 uptime_secs = 6;
+}
+
+enum ServerMode {
+  SERVER_MODE_UNKNOWN = 0;
+  SERVER_MODE_COMPACT = 1;
+  SERVER_MODE_AGENTS = 2;
+  SERVER_MODE_FULL = 3;
+}
+
+// Initialize session
 message InitializeRequest {
-    string protocol_version = 1;
-    ClientInfo client_info = 2;
+  string client_name = 1;
+  optional string client_version = 2;
+  optional string session_id = 3;
+  repeated string capabilities = 4;
 }
 
 message InitializeResponse {
-    string protocol_version = 1;
-    ServerInfo server_info = 2;
-    Capabilities capabilities = 3;
+  string protocol_version = 1;
+  string server_name = 2;
+  string server_version = 3;
+  repeated string capabilities = 4;
+  repeated string started_agents = 5;  // Run-on-connection agents
+  string session_id = 6;
 }
 
-message ClientInfo {
-    string name = 1;
-    string version = 2;
-}
-
-message ServerInfo {
-    string name = 1;
-    string version = 2;
-}
-
-message Capabilities {
-    bool tools = 1;
-    bool resources = 2;
-    bool prompts = 3;
-}
-
-// Tools
+// Tool listing
 message ListToolsRequest {
-    optional string category = 1;
-    optional int32 limit = 2;
-    optional int32 offset = 3;
+  optional string category = 1;
+  optional string query = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
 }
 
 message ListToolsResponse {
-    repeated ToolInfo tools = 1;
-    int32 total = 2;
-    bool has_more = 3;
+  repeated ToolInfo tools = 1;
+  uint32 total = 2;
+  bool has_more = 3;
 }
 
 message ToolInfo {
-    string name = 1;
-    string description = 2;
-    string input_schema_json = 3;  // JSON-encoded schema
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  optional string category = 4;
+  repeated string tags = 5;
 }
 
+// Tool execution
 message CallToolRequest {
-    string name = 1;
-    string arguments_json = 2;  // JSON-encoded arguments
+  string tool_name = 1;
+  string arguments_json = 2;
+  optional string session_id = 3;
+  optional uint32 timeout_ms = 4;
 }
 
 message CallToolResponse {
-    repeated Content content = 1;
-    bool is_error = 2;
+  bool success = 1;
+  string result_json = 2;
+  optional string error = 3;
+  uint64 duration_ms = 4;
 }
 
-message CallToolChunk {
-    string text = 1;
-    bool is_final = 2;
+// Streaming tool output
+message ToolOutput {
+  OutputType output_type = 1;
+  string content = 2;
+  uint32 sequence = 3;
+  bool is_final = 4;
+  optional int32 exit_code = 5;
 }
 
-message Content {
-    string type = 1;  // "text", "image", etc.
-    string text = 2;
-    optional string mime_type = 3;
-}
-
-// Resources
-message ListResourcesRequest {}
-
-message ListResourcesResponse {
-    repeated ResourceInfo resources = 1;
-}
-
-message ResourceInfo {
-    string uri = 1;
-    string name = 2;
-    optional string description = 3;
-    optional string mime_type = 4;
-}
-
-message ReadResourceRequest {
-    string uri = 1;
-}
-
-message ReadResourceResponse {
-    repeated ResourceContent contents = 1;
-}
-
-message ResourceContent {
-    string uri = 1;
-    string mime_type = 2;
-    string text = 3;
+enum OutputType {
+  OUTPUT_TYPE_UNKNOWN = 0;
+  OUTPUT_TYPE_STDOUT = 1;
+  OUTPUT_TYPE_STDERR = 2;
+  OUTPUT_TYPE_PROGRESS = 3;
+  OUTPUT_TYPE_RESULT = 4;
+  OUTPUT_TYPE_ERROR = 5;
 }

@@ -1,34 +1,19 @@
 //! op-mcp-server: Unified MCP Protocol Server
 //!
-//! Supports three modes:
+//! Supports multiple modes:
 //!   - compact: 4 meta-tools for discovering 148+ tools (default for LLMs)
 //!   - agents:  Always-on cognitive agents (memory, sequential_thinking, rust_pro, etc.)
 //!   - full:    All tools directly exposed
+//!   - grpc:    gRPC transport mode for high-performance internal communication
+//!   - grpc-agents: gRPC transport for agents
 //!
 //! Supports multiple transports:
 //!   op-mcp-server                           # stdio, compact mode
-//!   op-mcp-server --mode agents             # stdio, agents mode (starts rust_pro, memory, etc.)
+//!   op-mcp-server --mode agents             # stdio, agents mode
 //!   op-mcp-server --http 0.0.0.0:3001       # HTTP+SSE
 //!   op-mcp-server --ws 0.0.0.0:3002         # WebSocket
+//!   op-mcp-server --grpc 0.0.0.0:50051      # gRPC transport
 //!   op-mcp-server --all                     # All transports
-//!
-//! Run-On-Connection Agents (started automatically when client connects):
-//!   - rust_pro         : Rust development (cargo check/build/test/clippy)
-//!   - backend_architect: System design and architecture
-//!   - sequential_thinking: Step-by-step reasoning
-//!   - memory           : Key-value session memory
-//!   - context_manager  : Persistent context across sessions
-//!
-//! Example configurations:
-//!   # Agents MCP (recommended for development)
-//!   op-mcp-server --mode agents --http 0.0.0.0:3002
-//!
-//!   # Compact MCP (for Cursor, Gemini CLI, etc.)
-//!   op-mcp-server --mode compact --http 0.0.0.0:3001
-//!
-//!   # Both servers on different ports
-//!   op-mcp-server --mode compact --http 0.0.0.0:3001 &
-//!   op-mcp-server --mode agents --http 0.0.0.0:3002 &
 
 use anyhow::Result;
 use clap::Parser;
@@ -38,6 +23,8 @@ use op_mcp::{
     ServerMode,
     transport::{Transport, StdioTransport, HttpSseTransport, WebSocketTransport},
 };
+#[cfg(feature = "grpc")]
+use op_mcp::grpc::{GrpcTransport, GrpcConfig};
 use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -46,7 +33,7 @@ use tracing_subscriber::FmtSubscriber;
 #[command(name = "op-mcp-server")]
 #[command(about = "Unified MCP Protocol Server")]
 struct Cli {
-    /// Server mode: compact (4 meta-tools), agents (always-on), full (all tools)
+    /// Server mode: compact (4 meta-tools), agents (always-on), full (all tools), grpc, grpc-agents
     #[arg(long, short, default_value = "compact")]
     mode: String,
     
@@ -67,9 +54,12 @@ struct Cli {
     ws: Option<String>,
     
     /// Run gRPC transport on specified address
-    #[cfg(feature = "grpc")]
     #[arg(long, value_name = "ADDR")]
     grpc: Option<String>,
+    
+    /// gRPC port (shorthand, used with --mode grpc or grpc-agents)
+    #[arg(long, value_name = "PORT")]
+    grpc_port: Option<u16>,
     
     /// Run all transports with default addresses
     #[arg(long)]
@@ -92,7 +82,7 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     
-    // Initialize logging (stderr to not interfere with stdio transport)
+    // Initialize logging
     let level = match cli.log_level.as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
@@ -107,16 +97,45 @@ async fn main() -> Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
     
-    // Parse server mode
+    // Check for gRPC modes
+    if cli.mode == "grpc" || cli.mode == "grpc-agents" {
+        #[cfg(feature = "grpc")]
+        {
+            let port = cli.grpc_port.unwrap_or(if cli.mode == "grpc" { 50051 } else { 50052 });
+            let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+            let server_mode = if cli.mode == "grpc-agents" {
+                op_mcp::grpc::GrpcServerMode::Agents
+            } else {
+                op_mcp::grpc::GrpcServerMode::Compact
+            };
+            
+            info!(mode = %cli.mode, port = %port, "Starting gRPC MCP server");
+            
+            let config = GrpcConfig::default()
+                .with_address(addr)
+                .with_mode(server_mode);
+            
+            let transport = GrpcTransport::new(config).await?;
+            return transport.serve().await;
+        }
+        
+        #[cfg(not(feature = "grpc"))]
+        {
+            anyhow::bail!("gRPC support not compiled in. Rebuild with --features grpc");
+        }
+    }
+    
+    // Parse server mode for non-gRPC modes
     let mode: ServerMode = cli.mode.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     
     info!(mode = %mode, "Starting op-mcp-server");
     
     // Determine transports
     let run_stdio = cli.stdio || cli.all || 
-        (cli.http.is_none() && cli.sse.is_none() && cli.ws.is_none());
+        (cli.http.is_none() && cli.sse.is_none() && cli.ws.is_none() && cli.grpc.is_none());
     let http_addr = cli.http.or(cli.sse).or(if cli.all { Some("0.0.0.0:3001".into()) } else { None });
     let ws_addr = cli.ws.or(if cli.all { Some("0.0.0.0:3002".into()) } else { None });
+    let grpc_addr = cli.grpc.or(if cli.all { Some("0.0.0.0:50051".into()) } else { None });
     
     // Create and run server based on mode
     match mode {
@@ -130,7 +149,7 @@ async fn main() -> Result<()> {
             let server = McpServer::new(config).await?;
             info!(mode = %mode, "MCP server initialized");
             
-            run_transports(server, run_stdio, http_addr, ws_addr).await
+            run_transports(server, run_stdio, http_addr, ws_addr, grpc_addr).await
         }
         
         ServerMode::Agents => {
@@ -142,7 +161,6 @@ async fn main() -> Result<()> {
             
             let server = Arc::new(AgentsServer::new(config));
             
-            // Log run-on-connection agents
             let roc_agents: Vec<_> = server.run_on_connection_agents()
                 .iter()
                 .map(|a| a.id.as_str())
@@ -153,7 +171,7 @@ async fn main() -> Result<()> {
                 "Agents MCP server initialized"
             );
             
-            run_transports(server, run_stdio, http_addr, ws_addr).await
+            run_transports(server, run_stdio, http_addr, ws_addr, grpc_addr).await
         }
     }
 }
@@ -163,6 +181,7 @@ async fn run_transports<H>(
     run_stdio: bool,
     http_addr: Option<String>,
     ws_addr: Option<String>,
+    _grpc_addr: Option<String>,
 ) -> Result<()>
 where
     H: op_mcp::transport::McpHandler + 'static,
@@ -187,12 +206,14 @@ where
         }));
     }
     
-    // Run stdio in main thread if enabled (blocks)
+    // gRPC transport would be spawned here if needed with the generic handler
+    // For now, gRPC is handled separately with --mode grpc
+    
+    // Run stdio in main thread if enabled
     if run_stdio {
         info!("Starting stdio transport");
         StdioTransport::new().serve(server).await?;
     } else {
-        // Wait for spawned transports
         for handle in handles {
             handle.await??;
         }

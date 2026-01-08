@@ -5,8 +5,8 @@ edition = "2021"
 description = "Unified MCP Protocol Server with multiple transport and mode support"
 
 [features]
-default = []
-grpc = ["tonic", "prost"]
+default = ["grpc"]
+grpc = ["tonic", "prost", "tonic-build"]
 op-chat = ["dep:op-chat"]
 
 [dependencies]

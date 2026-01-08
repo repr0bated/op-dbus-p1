@@ -33,3 +33,7 @@ op-agents = { path = "../op-agents" }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[build-dependencies]
+tonic-build = "0.11"
+prost-build = "0.12"
