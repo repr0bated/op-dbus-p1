@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "op-dbus-agents": {
+      "url": "http://localhost:8080/mcp/agents",
+      "transport": "sse",
+      "description": "Complete op-dbus MCP server with all agents (memory, context, SEO, deployment, Python, debugging, prompt engineering)"
+    },
+    "op-dbus-compact": {
+      "url": "http://localhost:8080/mcp/compact",
+      "transport": "sse",
+      "description": "Compact op-dbus MCP server with meta-tools (list_tools, search_tools, execute_tool) for efficient AI tool discovery and execution"
+    }
+  }
+}

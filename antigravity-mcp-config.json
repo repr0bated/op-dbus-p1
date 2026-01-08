@@ -1,9 +1,14 @@
 {
   "mcpServers": {
-    "op-dbus-antigravity": {
-      "serverUrl": "http://localhost:8081/mcp/profile/antigravity",
+    "op-dbus-compact": {
+      "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/compact",
       "transport": "sse",
-      "description": "All agents - excludes direct server config (OVS, LXC, D-Bus, systemd)"
+      "description": "Compact op-dbus MCP with meta-tools (list_tools, search_tools, get_tool_schema, execute_tool)"
+    },
+    "op-dbus-agents": {
+      "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/agents",
+      "transport": "sse",
+      "description": "Critical agents MCP - memory, context, sequential thinking, search, deployment, debugging"
     }
   }
 }

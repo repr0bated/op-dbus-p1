@@ -1,62 +1,313 @@
-//! Compact MCP Server
+//! Compact Mode
 //!
-//! Provides stdio-based MCP server with only 4 meta-tools:
-//! - list_tools: Browse available tools with pagination
+//! Provides 4 meta-tools for discovering and executing 148+ tools:
+//! - list_tools: Browse available tools with filtering
 //! - search_tools: Search tools by keyword
 //! - get_tool_schema: Get input schema for a specific tool
 //! - execute_tool: Execute any tool by name
+//!
+//! This mode saves ~95% of context tokens compared to exposing all tools.
 
+use crate::{McpRequest, McpResponse, JsonRpcError, ToolExecutor};
 use anyhow::Result;
-use op_tools::ToolRegistry;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tracing::{debug, info, warn};
-use tracing_subscriber::prelude::*;
+use tracing::{debug, error, info};
 
-use crate::{McpRequest, McpResponse, McpServer, ResourceRegistry};
+/// Compact server wraps a tool executor and exposes 4 meta-tools
+pub struct CompactServer {
+    executor: Arc<dyn ToolExecutor>,
+    server_name: String,
+}
 
-/// Compact MCP tool definitions
-pub fn get_compact_tools() -> Vec<Value> {
+impl CompactServer {
+    pub fn new(executor: Arc<dyn ToolExecutor>) -> Self {
+        Self {
+            executor,
+            server_name: "op-mcp-compact".to_string(),
+        }
+    }
+    
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.server_name = name.into();
+        self
+    }
+    
+    /// Handle MCP request
+    pub async fn handle_request(&self, request: McpRequest) -> McpResponse {
+        debug!(method = %request.method, "Handling compact MCP request");
+        
+        match request.method.as_str() {
+            "initialize" => self.handle_initialize(request).await,
+            "initialized" => McpResponse::success(request.id, json!({})),
+            "ping" => McpResponse::success(request.id, json!({})),
+            "tools/list" => self.handle_tools_list(request).await,
+            "tools/call" => self.handle_tools_call(request).await,
+            "notifications/initialized" => McpResponse::success(request.id, json!({})),
+            _ => McpResponse::error(
+                request.id,
+                JsonRpcError::method_not_found(&request.method),
+            ),
+        }
+    }
+    
+    async fn handle_initialize(&self, request: McpRequest) -> McpResponse {
+        info!("Compact MCP initialized");
+        
+        McpResponse::success(request.id, json!({
+            "protocolVersion": crate::PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": { "listChanged": false }
+            },
+            "serverInfo": {
+                "name": self.server_name,
+                "version": crate::SERVER_VERSION
+            },
+            "instructions": "This server uses compact mode with 4 meta-tools. Use list_tools to discover available tools, get_tool_schema to get the input schema, then execute_tool to run any tool."
+        }))
+    }
+    
+    async fn handle_tools_list(&self, request: McpRequest) -> McpResponse {
+        McpResponse::success(request.id, json!({
+            "tools": compact_tools_schema(),
+            "_meta": { "compactMode": true }
+        }))
+    }
+    
+    async fn handle_tools_call(&self, request: McpRequest) -> McpResponse {
+        let params = match &request.params {
+            Some(p) => p,
+            None => return McpResponse::error(
+                request.id,
+                JsonRpcError::invalid_params("Missing params"),
+            ),
+        };
+        
+        let tool_name = match params.get("name").and_then(|n| n.as_str()) {
+            Some(n) => n,
+            None => return McpResponse::error(
+                request.id,
+                JsonRpcError::invalid_params("Missing tool name"),
+            ),
+        };
+        
+        let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        
+        // Route to meta-tool handlers
+        match tool_name {
+            "list_tools" => self.meta_list_tools(request.id, arguments).await,
+            "search_tools" => self.meta_search_tools(request.id, arguments).await,
+            "get_tool_schema" => self.meta_get_tool_schema(request.id, arguments).await,
+            "execute_tool" => self.meta_execute_tool(request.id, arguments).await,
+            _ => McpResponse::error(
+                request.id,
+                JsonRpcError::new(-32001, format!(
+                    "Unknown meta-tool: {}. Use list_tools, search_tools, get_tool_schema, or execute_tool.",
+                    tool_name
+                )),
+            ),
+        }
+    }
+    
+    async fn meta_list_tools(&self, id: Option<Value>, args: Value) -> McpResponse {
+        let category = args.get("category").and_then(|c| c.as_str());
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
+        let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+        
+        match self.executor.list_tools().await {
+            Ok(tools) => {
+                let filtered: Vec<_> = tools.into_iter()
+                    .filter(|t| {
+                        category.map(|c| {
+                            t.name.contains(c) || 
+                            t.description.to_lowercase().contains(&c.to_lowercase())
+                        }).unwrap_or(true)
+                    })
+                    .skip(offset)
+                    .take(limit)
+                    .map(|t| json!({
+                        "name": t.name,
+                        "description": t.description
+                    }))
+                    .collect();
+                
+                let total = filtered.len();
+                
+                McpResponse::success(id, json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&json!({
+                            "tools": filtered,
+                            "count": total,
+                            "offset": offset,
+                            "limit": limit
+                        })).unwrap()
+                    }],
+                    "isError": false
+                }))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to list tools");
+                McpResponse::success(id, json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                }))
+            }
+        }
+    }
+    
+    async fn meta_search_tools(&self, id: Option<Value>, args: Value) -> McpResponse {
+        let query = args.get("query").and_then(|q| q.as_str()).unwrap_or("");
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
+        
+        match self.executor.search_tools(query, limit).await {
+            Ok(tools) => {
+                let results: Vec<_> = tools.into_iter()
+                    .map(|t| json!({
+                        "name": t.name,
+                        "description": t.description
+                    }))
+                    .collect();
+                
+                McpResponse::success(id, json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&json!({
+                            "query": query,
+                            "results": results,
+                            "count": results.len()
+                        })).unwrap()
+                    }],
+                    "isError": false
+                }))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to search tools");
+                McpResponse::success(id, json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                }))
+            }
+        }
+    }
+    
+    async fn meta_get_tool_schema(&self, id: Option<Value>, args: Value) -> McpResponse {
+        let tool_name = args.get("tool_name").and_then(|n| n.as_str()).unwrap_or("");
+        
+        if tool_name.is_empty() {
+            return McpResponse::success(id, json!({
+                "content": [{ "type": "text", "text": "Error: tool_name is required" }],
+                "isError": true
+            }));
+        }
+        
+        match self.executor.get_tool_schema(tool_name).await {
+            Ok(Some(schema)) => {
+                McpResponse::success(id, json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&json!({
+                            "tool": tool_name,
+                            "schema": schema
+                        })).unwrap()
+                    }],
+                    "isError": false
+                }))
+            }
+            Ok(None) => {
+                McpResponse::success(id, json!({
+                    "content": [{ "type": "text", "text": format!("Tool not found: {}", tool_name) }],
+                    "isError": true
+                }))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to get tool schema");
+                McpResponse::success(id, json!({
+                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                    "isError": true
+                }))
+            }
+        }
+    }
+    
+    async fn meta_execute_tool(&self, id: Option<Value>, args: Value) -> McpResponse {
+        let tool_name = args.get("tool_name").and_then(|n| n.as_str()).unwrap_or("");
+        let arguments = args.get("arguments").cloned().unwrap_or(json!({}));
+        
+        if tool_name.is_empty() {
+            return McpResponse::success(id, json!({
+                "content": [{ "type": "text", "text": "Error: tool_name is required" }],
+                "isError": true
+            }));
+        }
+        
+        info!(tool = %tool_name, "Executing tool via compact mode");
+        
+        match self.executor.execute_tool(tool_name, arguments).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+                McpResponse::success(id, json!({
+                    "content": [{
+                        "type": "text",
+                        "text": text
+                    }],
+                    "isError": false
+                }))
+            }
+            Err(e) => {
+                error!(tool = %tool_name, error = %e, "Tool execution failed");
+                McpResponse::success(id, json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error executing {}: {}", tool_name, e)
+                    }],
+                    "isError": true
+                }))
+            }
+        }
+    }
+}
+
+/// Get the 4 compact meta-tool schemas
+pub fn compact_tools_schema() -> Vec<Value> {
     vec![
         json!({
             "name": "list_tools",
-            "description": "List all available tools. Use pagination for large tool sets. Returns tool names and descriptions.",
+            "description": "List available tools. Filter by category. Returns tool names and descriptions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "category": {
                         "type": "string",
-                        "description": "Filter by category (e.g., 'networking', 'system', 'database')"
+                        "description": "Filter by category (e.g., 'ovs', 'dbus', 'file', 'agent')"
                     },
                     "limit": {
                         "type": "integer",
-                        "default": 50,
-                        "description": "Maximum tools to return (default: 50, max: 100)"
+                        "description": "Maximum tools to return",
+                        "default": 20
                     },
                     "offset": {
                         "type": "integer",
-                        "default": 0,
-                        "description": "Pagination offset (default: 0)"
+                        "description": "Offset for pagination",
+                        "default": 0
                     }
-                },
-                "required": []
+                }
             }
         }),
         json!({
             "name": "search_tools",
-            "description": "Search for tools by keyword in name or description. Returns matching tools.",
+            "description": "Search tools by keyword in name or description.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query (searches in tool name and description)"
+                        "description": "Search query"
                     },
                     "limit": {
                         "type": "integer",
-                        "default": 20,
-                        "description": "Maximum results (default: 20)"
+                        "description": "Maximum results",
+                        "default": 10
                     }
                 },
                 "required": ["query"]
@@ -64,13 +315,13 @@ pub fn get_compact_tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_tool_schema",
-            "description": "Get the full input schema for a specific tool. Use this before calling execute_tool to understand required parameters.",
+            "description": "Get the input schema for a specific tool. Call this before execute_tool to know the required arguments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tool_name": {
                         "type": "string",
-                        "description": "Name of the tool to get schema for"
+                        "description": "Name of the tool"
                     }
                 },
                 "required": ["tool_name"]
@@ -78,7 +329,7 @@ pub fn get_compact_tools() -> Vec<Value> {
         }),
         json!({
             "name": "execute_tool",
-            "description": "Execute any tool by name with the provided arguments. First use get_tool_schema to understand the required input format.",
+            "description": "Execute any tool by name with arguments. First use get_tool_schema to see required arguments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -88,7 +339,7 @@ pub fn get_compact_tools() -> Vec<Value> {
                     },
                     "arguments": {
                         "type": "object",
-                        "description": "Arguments to pass to the tool (must match tool's input schema)"
+                        "description": "Arguments to pass to the tool"
                     }
                 },
                 "required": ["tool_name"]
@@ -97,249 +348,34 @@ pub fn get_compact_tools() -> Vec<Value> {
     ]
 }
 
-/// Run compact MCP server over stdio
+/// Run compact server in stdio mode
 pub async fn run_compact_stdio_server() -> Result<()> {
-    // Load environment
-    op_core::config::load_environment();
-
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "op_mcp=info,tokio=warn,warn".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-
-    info!("Starting compact MCP server (stdio mode)");
-
-    // Create minimal tool registry with just the meta-tools
-    let tool_registry = Arc::new(ToolRegistry::new());
-
-    // Register the compact meta-tools
-    register_compact_tools(&tool_registry).await?;
-
-    // Create ChatActor
-    let config = op_chat::ChatActorConfig::default();
-    let (chat_actor, chat_handle) = op_chat::ChatActor::with_registry(config, tool_registry).await?;
-    tokio::spawn(chat_actor.run());
-
-    info!("Compact MCP server ready");
-
-    // Create MCP server
-    let resource_registry = ResourceRegistry::new();
-    let mcp_server = Arc::new(McpServer::new(chat_handle, resource_registry));
-
-    // Run stdio protocol
-    run_stdio_protocol(mcp_server).await
+    use crate::transport::{Transport, StdioTransport};
+    use crate::{McpServerConfig, DefaultToolExecutor};
+    
+    // Initialize logging to stderr
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stderr)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+    
+    // Create tool registry and executor
+    let registry = Arc::new(op_tools::ToolRegistry::new());
+    op_tools::register_builtin_tools(&registry).await?;
+    
+    let executor: Arc<dyn ToolExecutor> = Arc::new(DefaultToolExecutor::new(registry));
+    let server = Arc::new(CompactServer::new(executor));
+    
+    info!("Starting compact MCP server (stdio)");
+    
+    StdioTransport::new().serve(server).await
 }
 
-/// Register compact meta-tools
-async fn register_compact_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
-    // For compact mode, we don't actually register real tools
-    // The meta-tools are handled specially by the MCP server
-    // This is just to satisfy the ChatActor initialization
-    Ok(())
-}
-
-/// Run MCP protocol over stdio
-async fn run_stdio_protocol(mcp_server: Arc<McpServer>) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-
-    let mut stdout_writer = stdout;
-    let mut lines = tokio::io::BufReader::new(stdin).lines();
-
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        debug!("Received MCP request: {}", line);
-
-        // Parse MCP request
-        let request: Result<McpRequest, _> = serde_json::from_str(line);
-        match request {
-            Ok(mcp_request) => {
-                // Handle compact mode specially
-                let response = handle_compact_request(mcp_request).await;
-
-                // Send response
-                let response_json = serde_json::to_string(&response)?;
-                stdout_writer.write_all(response_json.as_bytes()).await?;
-                stdout_writer.write_all(b"\n").await?;
-                stdout_writer.flush().await?;
-
-                debug!("Response sent");
-            }
-            Err(e) => {
-                warn!("Failed to parse MCP request: {}", e);
-
-                // Send error response
-                let error_response = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {
-                        "code": -32700,
-                        "message": "Parse error"
-                    }
-                });
-
-                let error_json = serde_json::to_string(&error_response)?;
-                stdout_writer.write_all(error_json.as_bytes()).await?;
-                stdout_writer.write_all(b"\n").await?;
-                stdout_writer.flush().await?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle compact mode MCP requests
-async fn handle_compact_request(request: McpRequest) -> McpResponse {
-    match request.method.as_str() {
-        "initialize" => McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: Some(json!({
-                "capabilities": {
-                    "tools": {
-                        "listChanged": false
-                    }
-                },
-                "instructions": "Compact MCP server with 4 meta-tools: list_tools (browse tools), search_tools (find tools), get_tool_schema (get tool details), execute_tool (run any tool).",
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {
-                    "name": "op-dbus-compact",
-                    "version": "1.0.0"
-                }
-            })),
-            error: None,
-        },
-
-        "initialized" => McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: Some(json!({})),
-            error: None,
-        },
-
-        "tools/list" => {
-            // Return the 4 meta-tools
-            McpResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
-                result: Some(json!({
-                    "tools": get_compact_tools()
-                })),
-                error: None,
-            }
-        }
-
-        "tools/call" => {
-            // Handle meta-tool execution by forwarding to HTTP endpoint
-            handle_tool_call(request).await
-        }
-
-        _ => McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: None,
-            error: Some(crate::protocol::McpError::new(
-                -32601,
-                format!("Method not found: {}", request.method),
-            )),
-        },
-    }
-}
-
-/// Handle tool execution by forwarding to HTTP endpoint
-async fn handle_tool_call(request: McpRequest) -> McpResponse {
-    let params = match &request.params {
-        Some(Value::Object(map)) => map,
-        _ => {
-            return McpResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
-                result: None,
-                error: Some(crate::protocol::McpError::new(
-                    -32602,
-                    "Invalid params: expected object".to_string(),
-                )),
-            }
-        }
-    };
-
-    let tool_name = match params.get("name") {
-        Some(Value::String(name)) => name.clone(),
-        _ => {
-            return McpResponse {
-                jsonrpc: "2.0".to_string(),
-                id: request.id,
-                result: None,
-                error: Some(crate::protocol::McpError::new(
-                    -32602,
-                    "Invalid params: missing 'name' field".to_string(),
-                )),
-            }
-        }
-    };
-
-    let empty_object = Value::Object(Default::default());
-    let arguments = params.get("arguments").unwrap_or(&empty_object);
-
-    // Forward to HTTP endpoint
-    match forward_to_http(&tool_name, arguments).await {
-        Ok(result) => McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: Some(result),
-            error: None,
-        },
-        Err(err) => McpResponse {
-            jsonrpc: "2.0".to_string(),
-            id: request.id,
-            result: None,
-            error: Some(crate::protocol::McpError::new(
-                -32603,
-                format!("Tool execution failed: {}", err),
-            )),
-        },
-    }
-}
-
-/// Forward tool execution to HTTP endpoint
-async fn forward_to_http(tool_name: &str, arguments: &Value) -> Result<Value> {
-    let client = reqwest::Client::new();
-
-    let request_body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments
-        }
-    });
-
-    let response = client
-        .post("http://localhost:8081/mcp/compact/message")
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .send()
-        .await?;
-
-    let response_json: Value = response.json().await?;
-
-    if let Some(error) = response_json.get("error") {
-        return Err(anyhow::anyhow!("HTTP error: {}", error));
-    }
-
-    if let Some(result) = response_json.get("result") {
-        Ok(result.clone())
-    } else {
-        Err(anyhow::anyhow!("No result in HTTP response"))
+// Implement McpHandler for CompactServer
+#[async_trait::async_trait]
+impl crate::transport::McpHandler for CompactServer {
+    async fn handle_request(&self, request: McpRequest) -> McpResponse {
+        self.handle_request(request).await
     }
 }

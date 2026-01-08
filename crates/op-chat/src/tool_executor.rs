@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use op_core::{ExecutionContext, ExecutionResult, ExecutionTracker};
+use op_execution_tracker::{ExecutionTracker, ExecutionContext, ExecutionResult};
 use op_tools::ToolRegistry;
 use serde_json::Value;
 use std::collections::HashMap;

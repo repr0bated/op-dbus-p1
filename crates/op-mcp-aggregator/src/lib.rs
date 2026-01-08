@@ -83,7 +83,8 @@ pub use profile::ProfileManager;
 pub use client::McpClient;
 pub use cache::ToolCache;
 pub use compact::{CompactModeConfig, create_compact_tools, compact_mode_summary};
-pub use groups::{AccessZone, SecurityLevel, NetworkConfig, builtin_groups, builtin_presets};
+pub use groups::{builtin_groups, builtin_presets};
+pub use op_core::security::{AccessZone, SecurityLevel, NetworkConfig};
 
 /// Prelude for convenient imports
 pub mod prelude {

@@ -256,17 +256,17 @@ async fn get_access_zone(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Json<Value> {
     let ip = addr.ip().to_string();
-    let zone = op_mcp_aggregator::groups::AccessZone::from_ip(&ip);
+    let zone = op_core::security::AccessZone::from_ip(&ip);
     
     Json(json!({
         "client_ip": ip,
         "zone": format!("{:?}", zone).to_lowercase(),
         "description": zone.description(),
         "can_access": {
-            "public": zone.can_access(op_mcp_aggregator::groups::SecurityLevel::Public),
-            "standard": zone.can_access(op_mcp_aggregator::groups::SecurityLevel::Standard),
-            "elevated": zone.can_access(op_mcp_aggregator::groups::SecurityLevel::Elevated),
-            "restricted": zone.can_access(op_mcp_aggregator::groups::SecurityLevel::Restricted),
+            "public": zone.can_access(op_core::security::SecurityLevel::Public),
+            "standard": zone.can_access(op_core::security::SecurityLevel::Standard),
+            "elevated": zone.can_access(op_core::security::SecurityLevel::Elevated),
+            "restricted": zone.can_access(op_core::security::SecurityLevel::Restricted),
         }
     }))
 }

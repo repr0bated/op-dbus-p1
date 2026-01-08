@@ -8,6 +8,7 @@ use axum::{
 };
 use axum::response::sse::Sse;
 use futures::{Stream, StreamExt};
+use op_core::security::{AccessZone, SecurityLevel};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::process::Stdio;
@@ -81,46 +82,17 @@ fn extract_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
     "0.0.0.0".to_string()
 }
 
-/// Check if IP is allowed (Localhost or Private/Mesh networks)
+/// Check if IP is allowed (Localhost, TrustedMesh, or PrivateNetwork)
 fn is_ip_allowed(ip: &str) -> bool {
-    let ip = ip.trim();
-
-    // Localhost
-    if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
-        return true;
-    }
-
-    // Private/Mesh networks (Simplified from op-mcp)
-    // 10.x.x.x (VPNs often use this)
-    if ip.starts_with("10.") {
-        return true;
-    }
-    // 192.168.x.x
-    if ip.starts_with("192.168.") {
-        return true;
-    }
-    // 100.x.x.x (Tailscale CGNAT is 100.64.0.0/10)
-    // This allows the full 100.x range which covers Tailscale (100.64-127)
-    if ip.starts_with("100.") {
-        return true;
-    }
-    // 172.16-31.x.x
-    if ip.starts_with("172.") {
-        if let Some(second_octet) = ip.split('.').nth(1) {
-            if let Ok(n) = second_octet.parse::<u8>() {
-                if (16..=31).contains(&n) {
-                    return true;
-                }
-            }
-        }
-    }
+    let zone = AccessZone::from_ip(ip);
     
-    // IPv6 Unique Local (VPNs)
-    if ip.starts_with("fd") {
-        return true;
+    // We allow everything except Public
+    match zone {
+        AccessZone::Localhost => true,
+        AccessZone::TrustedMesh => true,
+        AccessZone::PrivateNetwork => true,
+        AccessZone::Public => false,
     }
-
-    false
 }
 
 /// Middleware to restrict access to trusted IPs

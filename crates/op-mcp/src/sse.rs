@@ -84,12 +84,11 @@ async fn message_handler(
     // Handle the request
     let response = state.mcp_server.handle_request(request).await;
 
-    // Also broadcast to SSE clients
-    if let Ok(json) = serde_json::to_string(&response) {
-        let _ = state.event_tx.send(json);
-    }
+    // Do NOT broadcast command responses to all SSE clients.
+    // Responses should only go back to the caller.
+    // The shared event_tx channel should be reserved for actual server events/notifications.
 
-    // Return response directly too (for non-SSE clients)
+    // Return response directly (for non-SSE clients)
     Json(serde_json::to_value(&response).unwrap_or_default())
 }
 

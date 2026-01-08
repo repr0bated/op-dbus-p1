@@ -4,7 +4,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use op_mcp_aggregator::groups::AccessZone;
+use op_core::security::AccessZone;
 use std::net::SocketAddr;
 use tracing::debug;
 

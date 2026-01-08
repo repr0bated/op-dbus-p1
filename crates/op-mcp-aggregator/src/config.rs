@@ -90,6 +90,7 @@ impl AggregatorConfig {
     /// Load from default paths, with fallbacks
     pub fn load_default() -> Result<Self> {
         let paths = [
+            "/etc/mcp/mcp-servers.json",
             "/etc/op-dbus/aggregator.json",
             "/etc/op-dbus/mcp-aggregator.json",
             "aggregator.json",

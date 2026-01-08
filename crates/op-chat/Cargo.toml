@@ -26,6 +26,7 @@ op-core = { path = "../op-core" }
 op-tools = { path = "../op-tools" }
 op-introspection = { path = "../op-introspection" }
 op-llm = { path = "../op-llm" }
+op-execution-tracker = { path = "../op-execution-tracker" }
 regex = { workspace = true }
 libc = { workspace = true }
 op-agents = { path = "../op-agents" }

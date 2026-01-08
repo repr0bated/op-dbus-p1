@@ -1,0 +1,118 @@
+// MCP gRPC Service Definition
+//
+// Compile with:
+//   protoc --rust_out=src/grpc --grpc_out=src/grpc mcp.proto
+
+syntax = "proto3";
+
+package mcp;
+
+// MCP Service
+service McpService {
+    // Standard MCP methods
+    rpc Initialize(InitializeRequest) returns (InitializeResponse);
+    rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+    rpc CallTool(CallToolRequest) returns (CallToolResponse);
+    rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+    rpc ReadResource(ReadResourceRequest) returns (ReadResourceResponse);
+    
+    // Streaming variants
+    rpc StreamTools(ListToolsRequest) returns (stream ToolInfo);
+    rpc StreamCallTool(CallToolRequest) returns (stream CallToolChunk);
+}
+
+// Initialize
+message InitializeRequest {
+    string protocol_version = 1;
+    ClientInfo client_info = 2;
+}
+
+message InitializeResponse {
+    string protocol_version = 1;
+    ServerInfo server_info = 2;
+    Capabilities capabilities = 3;
+}
+
+message ClientInfo {
+    string name = 1;
+    string version = 2;
+}
+
+message ServerInfo {
+    string name = 1;
+    string version = 2;
+}
+
+message Capabilities {
+    bool tools = 1;
+    bool resources = 2;
+    bool prompts = 3;
+}
+
+// Tools
+message ListToolsRequest {
+    optional string category = 1;
+    optional int32 limit = 2;
+    optional int32 offset = 3;
+}
+
+message ListToolsResponse {
+    repeated ToolInfo tools = 1;
+    int32 total = 2;
+    bool has_more = 3;
+}
+
+message ToolInfo {
+    string name = 1;
+    string description = 2;
+    string input_schema_json = 3;  // JSON-encoded schema
+}
+
+message CallToolRequest {
+    string name = 1;
+    string arguments_json = 2;  // JSON-encoded arguments
+}
+
+message CallToolResponse {
+    repeated Content content = 1;
+    bool is_error = 2;
+}
+
+message CallToolChunk {
+    string text = 1;
+    bool is_final = 2;
+}
+
+message Content {
+    string type = 1;  // "text", "image", etc.
+    string text = 2;
+    optional string mime_type = 3;
+}
+
+// Resources
+message ListResourcesRequest {}
+
+message ListResourcesResponse {
+    repeated ResourceInfo resources = 1;
+}
+
+message ResourceInfo {
+    string uri = 1;
+    string name = 2;
+    optional string description = 3;
+    optional string mime_type = 4;
+}
+
+message ReadResourceRequest {
+    string uri = 1;
+}
+
+message ReadResourceResponse {
+    repeated ResourceContent contents = 1;
+}
+
+message ResourceContent {
+    string uri = 1;
+    string mime_type = 2;
+    string text = 3;
+}

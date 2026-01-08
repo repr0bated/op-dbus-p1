@@ -390,7 +390,7 @@ pub async fn mcp_agents_sse_handler(
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("https");
+        .unwrap_or("http");
 
     let post_url = format!("{}://{}/mcp/agents/message", scheme, host);
     info!("MCP Agents POST endpoint: {}", post_url);

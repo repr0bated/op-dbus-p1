@@ -1,438 +1,564 @@
-//! MCP Server with Lazy Tool Loading
+//! Unified MCP Server
 //!
-//! This module implements the MCP JSON-RPC server with integrated
-//! lazy tool loading support.
+//! Core server implementation that handles all MCP protocol logic.
+//! Transport-agnostic - works with stdio, HTTP, WebSocket, gRPC, etc.
 
+use crate::protocol::{McpRequest, McpResponse, JsonRpcError};
+use crate::resources::ResourceRegistry;
+use crate::{PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
-use crate::lazy_tools::{get_mcp_tool_list, LazyToolConfig, LazyToolManager};
-use op_tools::tool::Tool;
-
-/// MCP Server configuration
+/// Server configuration
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
-    /// Server name
-    pub name: String,
-    /// Server version
-    pub version: String,
-    /// Lazy tool loading config
-    pub tool_config: LazyToolConfig,
+    /// Server name override
+    pub name: Option<String>,
+    /// Enable compact mode (4 meta-tools instead of all tools)
+    pub compact_mode: bool,
+    /// Tool categories to expose (None = all)
+    pub allowed_categories: Option<Vec<String>>,
+    /// Tool name patterns to block
+    pub blocked_patterns: Vec<String>,
+    /// Maximum tools to return in list
+    pub max_tools: usize,
 }
 
 impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
-            name: "op-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            tool_config: LazyToolConfig::default(),
+            name: None,
+            compact_mode: false,
+            allowed_categories: None,
+            blocked_patterns: vec![
+                "shell_execute".into(),
+                "write_file".into(),
+                "systemd_start".into(),
+                "systemd_stop".into(),
+                "systemd_restart".into(),
+                "systemd_enable".into(),
+                "systemd_disable".into(),
+            ],
+            max_tools: 500,
         }
     }
 }
 
-/// MCP JSON-RPC Request
-#[derive(Debug, Deserialize)]
-pub struct McpRequest {
-    pub jsonrpc: String,
-    pub id: Option<Value>,
-    pub method: String,
-    #[serde(default)]
-    pub params: Option<Value>,
+/// Tool information for MCP
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "inputSchema")]
+    pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }
 
-/// MCP JSON-RPC Response
-#[derive(Debug, Serialize)]
-pub struct McpResponse {
-    pub jsonrpc: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<McpError>,
+/// Tool executor trait - implement this to provide tools
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    /// List available tools
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>>;
+    
+    /// Execute a tool by name
+    async fn execute_tool(&self, name: &str, arguments: Value) -> Result<Value>;
+    
+    /// Get schema for a specific tool
+    async fn get_tool_schema(&self, name: &str) -> Result<Option<Value>>;
+    
+    /// Search tools by query
+    async fn search_tools(&self, query: &str, limit: usize) -> Result<Vec<ToolInfo>>;
 }
 
-/// MCP Error
-#[derive(Debug, Serialize)]
-pub struct McpError {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
+/// Default tool executor using op_tools registry
+pub struct DefaultToolExecutor {
+    registry: Arc<op_tools::ToolRegistry>,
 }
 
-impl McpResponse {
-    pub fn success(id: Option<Value>, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    pub fn error(id: Option<Value>, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(McpError {
-                code,
-                message: message.into(),
-                data: None,
-            }),
-        }
+impl DefaultToolExecutor {
+    pub fn new(registry: Arc<op_tools::ToolRegistry>) -> Self {
+        Self { registry }
     }
 }
 
-/// MCP Server with lazy tool loading
+#[async_trait::async_trait]
+impl ToolExecutor for DefaultToolExecutor {
+    async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
+        let tools = self.registry.list().await;
+        Ok(tools.into_iter().map(|t| ToolInfo {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+            annotations: None,
+        }).collect())
+    }
+    
+    async fn execute_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+        if let Some(tool) = self.registry.get(name).await {
+            tool.execute(arguments).await
+        } else {
+            Err(anyhow::anyhow!("Tool not found: {}", name))
+        }
+    }
+    
+    async fn get_tool_schema(&self, name: &str) -> Result<Option<Value>> {
+        if let Some(def) = self.registry.get_definition(name).await {
+            Ok(Some(def.input_schema))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn search_tools(&self, query: &str, limit: usize) -> Result<Vec<ToolInfo>> {
+        let tools = self.registry.list().await;
+        let query_lower = query.to_lowercase();
+        Ok(tools.into_iter()
+            .filter(|t| {
+                t.name.to_lowercase().contains(&query_lower) ||
+                t.description.to_lowercase().contains(&query_lower)
+            })
+            .take(limit)
+            .map(|t| ToolInfo {
+                name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+                annotations: None,
+            })
+            .collect())
+    }
+}
+
+/// Unified MCP Server
 pub struct McpServer {
     config: McpServerConfig,
-    tool_manager: Arc<LazyToolManager>,
+    tool_executor: Arc<dyn ToolExecutor>,
+    resources: ResourceRegistry,
+    /// Client info from last initialize
+    client_info: RwLock<Option<ClientInfo>>,
+    /// Session data
+    sessions: RwLock<HashMap<String, SessionData>>,
+}
+
+#[derive(Debug, Clone)]
+struct ClientInfo {
+    name: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionData {
+    initialized: bool,
+    compact_mode: bool,
 }
 
 impl McpServer {
-    /// Create a new MCP server
-    pub async fn new(config: McpServerConfig) -> Result<Self> {
-        let tool_manager = Arc::new(LazyToolManager::with_config(config.tool_config.clone()).await?);
-
-        Ok(Self {
+    /// Create server with default tool executor
+    pub async fn new(config: McpServerConfig) -> Result<Arc<Self>> {
+        let registry = Arc::new(op_tools::ToolRegistry::new());
+        op_tools::register_builtin_tools(&registry).await?;
+        
+        let tool_executor = Arc::new(DefaultToolExecutor::new(registry));
+        Ok(Arc::new(Self::with_executor(config, tool_executor)))
+    }
+    
+    /// Create server with custom tool executor
+    pub fn with_executor(
+        config: McpServerConfig,
+        tool_executor: Arc<dyn ToolExecutor>,
+    ) -> Self {
+        Self {
             config,
-            tool_manager,
-        })
-    }
-
-    /// Run the server on stdio
-    pub async fn run_stdio(&self) -> Result<()> {
-        info!("Starting MCP server: {} v{}", self.config.name, self.config.version);
-
-        let stdin = tokio::io::stdin();
-        let mut stdout = tokio::io::stdout();
-        let reader = BufReader::new(stdin);
-        let mut lines = reader.lines();
-
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            debug!("Received: {}", line);
-
-            let response = match serde_json::from_str::<McpRequest>(&line) {
-                Ok(request) => self.handle_request(request).await,
-                Err(e) => McpResponse::error(None, -32700, format!("Parse error: {}", e)),
-            };
-
-            let response_json = serde_json::to_string(&response)?;
-            debug!("Sending: {}", response_json);
-
-            stdout.write_all(response_json.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            tool_executor,
+            resources: ResourceRegistry::new(),
+            client_info: RwLock::new(None),
+            sessions: RwLock::new(HashMap::new()),
         }
-
-        info!("MCP server shutting down");
-        Ok(())
     }
-
-    /// Handle a single request
-    async fn handle_request(&self, request: McpRequest) -> McpResponse {
+    
+    /// Handle an MCP request
+    pub async fn handle_request(&self, request: McpRequest) -> McpResponse {
+        debug!(method = %request.method, "Handling MCP request");
+        
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(request.id, request.params).await,
-            "initialized" => McpResponse::success(request.id, json!({})),
-            "tools/list" => self.handle_tools_list(request.id, request.params).await,
-            "tools/call" => self.handle_tools_call(request.id, request.params).await,
-            "resources/list" => self.handle_resources_list(request.id).await,
-            "resources/read" => self.handle_resources_read(request.id, request.params).await,
+            "initialize" => self.handle_initialize(request).await,
+            "initialized" => self.handle_initialized(request).await,
             "ping" => McpResponse::success(request.id, json!({})),
-            _ => McpResponse::error(request.id, -32601, format!("Method not found: {}", request.method)),
+            "tools/list" => self.handle_tools_list(request).await,
+            "tools/call" => self.handle_tools_call(request).await,
+            "resources/list" => self.handle_resources_list(request).await,
+            "resources/read" => self.handle_resources_read(request).await,
+            // Compact mode meta-tools
+            "list_tools" | "search_tools" | "get_tool_schema" | "execute_tool" => {
+                self.handle_compact_tool(request).await
+            }
+            _ => McpResponse::error(
+                request.id,
+                JsonRpcError::method_not_found(&request.method),
+            ),
         }
     }
-
-    /// Handle initialize request
-    async fn handle_initialize(&self, id: Option<Value>, _params: Option<Value>) -> McpResponse {
-        let (registry_stats, discovery_stats) = self.tool_manager.stats().await;
-
-        McpResponse::success(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {
-                        "listChanged": true
-                    },
-                    "resources": {
-                        "subscribe": false,
-                        "listChanged": false
-                    }
-                },
-                "serverInfo": {
-                    "name": self.config.name,
-                    "version": self.config.version
-                },
-                "_meta": {
-                    "lazyLoading": true,
-                    "totalToolsAvailable": discovery_stats.total_tools,
-                    "toolsCurrentlyLoaded": registry_stats.currently_loaded
-                }
-            }),
-        )
+    
+    async fn handle_initialize(&self, request: McpRequest) -> McpResponse {
+        // Extract client info
+        let client_name = request.params
+            .as_ref()
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        
+        let client_version = request.params
+            .as_ref()
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("version"))
+            .and_then(|v| v.as_str());
+        
+        // Store client info
+        *self.client_info.write().await = Some(ClientInfo {
+            name: client_name.to_string(),
+            version: client_version.map(String::from),
+        });
+        
+        // Auto-detect compact mode for known clients
+        let use_compact = self.config.compact_mode || 
+            Self::should_use_compact_mode(client_name);
+        
+        info!(
+            client = %client_name,
+            version = %client_version.unwrap_or("?"),
+            compact = %use_compact,
+            "Client connected"
+        );
+        
+        let server_name = self.config.name.as_deref().unwrap_or(SERVER_NAME);
+        
+        McpResponse::success(request.id, json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "resources": { "subscribe": false, "listChanged": false }
+            },
+            "serverInfo": {
+                "name": server_name,
+                "version": SERVER_VERSION
+            },
+            "_meta": {
+                "compactMode": use_compact
+            }
+        }))
     }
-
-    /// Handle tools/list request
-    async fn handle_tools_list(&self, id: Option<Value>, params: Option<Value>) -> McpResponse {
-        // Extract pagination parameters
-        let (offset, limit, context) = if let Some(p) = params {
-            let offset = p.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let limit = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
-            let context = p.get("context").and_then(|v| v.as_str()).map(String::from);
-            (offset, limit, context)
-        } else {
-            (0, 100, None)
-        };
-
-        let tool_list = get_mcp_tool_list(
-            &self.tool_manager,
-            offset,
-            limit,
-            context.as_deref(),
-        )
-        .await;
-
-        McpResponse::success(
-            id,
-            json!({
-                "tools": tool_list.tools,
-                "_meta": {
-                    "total": tool_list.total,
-                    "offset": tool_list.offset,
-                    "limit": tool_list.limit,
-                    "hasMore": tool_list.has_more
-                }
-            }),
-        )
+    
+    async fn handle_initialized(&self, request: McpRequest) -> McpResponse {
+        McpResponse::success(request.id, json!({}))
     }
-
-    /// Handle tools/call request
-    async fn handle_tools_call(&self, id: Option<Value>, params: Option<Value>) -> McpResponse {
-        let params = match params {
+    
+    async fn handle_tools_list(&self, request: McpRequest) -> McpResponse {
+        // Check if compact mode
+        let client_info = self.client_info.read().await;
+        let use_compact = self.config.compact_mode ||
+            client_info.as_ref().map(|c| Self::should_use_compact_mode(&c.name)).unwrap_or(false);
+        
+        if use_compact {
+            return self.get_compact_tools_response(request.id).await;
+        }
+        
+        // Full mode - return all tools
+        match self.tool_executor.list_tools().await {
+            Ok(tools) => {
+                let filtered: Vec<_> = tools.into_iter()
+                    .filter(|t| !self.is_tool_blocked(&t.name))
+                    .take(self.config.max_tools)
+                    .collect();
+                
+                McpResponse::success(request.id, json!({
+                    "tools": filtered
+                }))
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to list tools");
+                McpResponse::error(request.id, JsonRpcError::internal_error(e.to_string()))
+            }
+        }
+    }
+    
+    async fn handle_tools_call(&self, request: McpRequest) -> McpResponse {
+        let params = match &request.params {
             Some(p) => p,
-            None => return McpResponse::error(id, -32602, "Missing params"),
+            None => return McpResponse::error(
+                request.id,
+                JsonRpcError::invalid_params("Missing params"),
+            ),
         };
-
-        let tool_name = match params.get("name").and_then(|v| v.as_str()) {
+        
+        let tool_name = match params.get("name").and_then(|n| n.as_str()) {
             Some(n) => n,
-            None => return McpResponse::error(id, -32602, "Missing tool name"),
+            None => return McpResponse::error(
+                request.id,
+                JsonRpcError::invalid_params("Missing tool name"),
+            ),
         };
-
+        
+        // Check if blocked
+        if self.is_tool_blocked(tool_name) {
+            warn!(tool = %tool_name, "Blocked tool execution attempt");
+            return McpResponse::error(
+                request.id,
+                JsonRpcError::new(-32001, format!("Tool '{}' is not available", tool_name)),
+            );
+        }
+        
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-
-        // Get tool (lazy loading if needed)
-        let tool = match self.tool_manager.get_tool(tool_name).await {
-            Some(t) => t,
-            None => return McpResponse::error(id, -32602, format!("Tool not found: {}", tool_name)),
-        };
-
-        // Execute tool
-        match tool.execute(arguments).await {
-            Ok(result) => McpResponse::success(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-                    }],
-                    "isError": false
-                }),
-            ),
-            Err(e) => McpResponse::success(
-                id,
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Error: {}", e)
-                    }],
-                    "isError": true
-                }),
-            ),
+        
+        match self.tool_executor.execute_tool(tool_name, arguments).await {
+            Ok(result) => McpResponse::success(request.id, json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                }],
+                "isError": false
+            })),
+            Err(e) => McpResponse::success(request.id, json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Error: {}", e)
+                }],
+                "isError": true
+            })),
         }
     }
-
-    /// Handle resources/list request
-    async fn handle_resources_list(&self, id: Option<Value>) -> McpResponse {
-        // Return embedded documentation resources
-        McpResponse::success(
-            id,
-            json!({
-                "resources": [
-                    {
-                        "uri": "docs://architecture",
-                        "name": "Architecture Documentation",
-                        "description": "System architecture overview",
-                        "mimeType": "text/markdown"
-                    },
-                    {
-                        "uri": "docs://tools",
-                        "name": "Tool Documentation",
-                        "description": "Available tools and usage",
-                        "mimeType": "text/markdown"
-                    }
-                ]
-            }),
-        )
+    
+    async fn handle_resources_list(&self, request: McpRequest) -> McpResponse {
+        let resources: Vec<_> = self.resources.list_resources()
+            .iter()
+            .map(|r| json!({
+                "uri": r.uri,
+                "name": r.name,
+                "description": r.description,
+                "mimeType": r.mime_type
+            }))
+            .collect();
+        
+        McpResponse::success(request.id, json!({ "resources": resources }))
     }
-
-    /// Handle resources/read request
-    async fn handle_resources_read(
-        &self,
-        id: Option<Value>,
-        params: Option<Value>,
-    ) -> McpResponse {
-        let uri = params
+    
+    async fn handle_resources_read(&self, request: McpRequest) -> McpResponse {
+        let uri = request.params
             .as_ref()
             .and_then(|p| p.get("uri"))
-            .and_then(|v| v.as_str())
+            .and_then(|u| u.as_str())
             .unwrap_or("");
-
-        let content = match uri {
-            "docs://architecture" => ARCHITECTURE_DOC,
-            "docs://tools" => "# Tools\n\nUse tools/list to see available tools.",
-            _ => return McpResponse::error(id, -32602, format!("Resource not found: {}", uri)),
-        };
-
-        McpResponse::success(
-            id,
-            json!({
+        
+        if uri.is_empty() {
+            return McpResponse::error(
+                request.id,
+                JsonRpcError::invalid_params("Missing uri"),
+            );
+        }
+        
+        match self.resources.read_resource(uri).await {
+            Some(content) => McpResponse::success(request.id, json!({
                 "contents": [{
                     "uri": uri,
-                    "mimeType": "text/markdown",
+                    "mimeType": "text/plain",
                     "text": content
                 }]
+            })),
+            None => McpResponse::error(
+                request.id,
+                JsonRpcError::new(-32002, format!("Resource not found: {}", uri)),
+            ),
+        }
+    }
+    
+    /// Handle compact mode meta-tools
+    async fn handle_compact_tool(&self, request: McpRequest) -> McpResponse {
+        let params = request.params.as_ref().cloned().unwrap_or(json!({}));
+        
+        match request.method.as_str() {
+            "list_tools" => {
+                let category = params.get("category").and_then(|c| c.as_str());
+                let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
+                
+                match self.tool_executor.list_tools().await {
+                    Ok(tools) => {
+                        let filtered: Vec<_> = tools.into_iter()
+                            .filter(|t| !self.is_tool_blocked(&t.name))
+                            .filter(|t| {
+                                category.map(|c| t.name.contains(c) || 
+                                    t.description.to_lowercase().contains(&c.to_lowercase()))
+                                    .unwrap_or(true)
+                            })
+                            .take(limit)
+                            .map(|t| json!({
+                                "name": t.name,
+                                "description": t.description
+                            }))
+                            .collect();
+                        
+                        McpResponse::success(request.id, json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string_pretty(&filtered).unwrap()
+                            }],
+                            "isError": false
+                        }))
+                    }
+                    Err(e) => McpResponse::success(request.id, json!({
+                        "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                        "isError": true
+                    })),
+                }
+            }
+            "search_tools" => {
+                let query = params.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
+                
+                match self.tool_executor.search_tools(query, limit).await {
+                    Ok(tools) => {
+                        let results: Vec<_> = tools.into_iter()
+                            .filter(|t| !self.is_tool_blocked(&t.name))
+                            .map(|t| json!({
+                                "name": t.name,
+                                "description": t.description
+                            }))
+                            .collect();
+                        
+                        McpResponse::success(request.id, json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string_pretty(&results).unwrap()
+                            }],
+                            "isError": false
+                        }))
+                    }
+                    Err(e) => McpResponse::success(request.id, json!({
+                        "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                        "isError": true
+                    })),
+                }
+            }
+            "get_tool_schema" => {
+                let tool_name = params.get("tool_name").and_then(|n| n.as_str()).unwrap_or("");
+                
+                match self.tool_executor.get_tool_schema(tool_name).await {
+                    Ok(Some(schema)) => McpResponse::success(request.id, json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&schema).unwrap()
+                        }],
+                        "isError": false
+                    })),
+                    Ok(None) => McpResponse::success(request.id, json!({
+                        "content": [{ "type": "text", "text": format!("Tool not found: {}", tool_name) }],
+                        "isError": true
+                    })),
+                    Err(e) => McpResponse::success(request.id, json!({
+                        "content": [{ "type": "text", "text": format!("Error: {}", e) }],
+                        "isError": true
+                    })),
+                }
+            }
+            "execute_tool" => {
+                let tool_name = params.get("tool_name").and_then(|n| n.as_str()).unwrap_or("");
+                let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+                
+                // Delegate to tools/call logic
+                let call_request = McpRequest {
+                    jsonrpc: "2.0".into(),
+                    id: request.id.clone(),
+                    method: "tools/call".into(),
+                    params: Some(json!({
+                        "name": tool_name,
+                        "arguments": arguments
+                    })),
+                };
+                self.handle_tools_call(call_request).await
+            }
+            _ => McpResponse::error(
+                request.id,
+                JsonRpcError::method_not_found(&request.method),
+            ),
+        }
+    }
+    
+    /// Get compact mode tools response
+    async fn get_compact_tools_response(&self, id: Option<Value>) -> McpResponse {
+        let compact_tools = vec![
+            json!({
+                "name": "list_tools",
+                "description": "List available tools. Filter by 'category'. Returns names and descriptions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string", "description": "Filter by category" },
+                        "limit": { "type": "integer", "description": "Max tools (default: 20)" }
+                    }
+                }
             }),
-        )
+            json!({
+                "name": "search_tools",
+                "description": "Search tools by keyword.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query" },
+                        "limit": { "type": "integer", "description": "Max results (default: 10)" }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            json!({
+                "name": "get_tool_schema",
+                "description": "Get input schema for a tool. Call before execute_tool.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": { "type": "string", "description": "Tool name" }
+                    },
+                    "required": ["tool_name"]
+                }
+            }),
+            json!({
+                "name": "execute_tool",
+                "description": "Execute a tool by name.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": { "type": "string", "description": "Tool name" },
+                        "arguments": { "type": "object", "description": "Tool arguments" }
+                    },
+                    "required": ["tool_name"]
+                }
+            }),
+        ];
+        
+        McpResponse::success(id, json!({
+            "tools": compact_tools,
+            "_meta": { "compactMode": true }
+        }))
     }
-
-    /// Get tool manager reference
-    pub fn tool_manager(&self) -> Arc<LazyToolManager> {
-        Arc::clone(&self.tool_manager)
+    
+    /// Check if a tool should be blocked
+    fn is_tool_blocked(&self, name: &str) -> bool {
+        self.config.blocked_patterns.iter().any(|p| name.contains(p))
     }
-}
-
-/// Embedded architecture documentation
-const ARCHITECTURE_DOC: &str = r#"# op-mcp Architecture
-
-## Overview
-
-op-mcp is a clean MCP (Model Context Protocol) server that provides:
-
-1. **MCP JSON-RPC 2.0 Protocol** - Standard MCP protocol over stdio
-2. **Lazy Tool Loading** - Tools loaded on-demand with LRU caching
-3. **Discovery System** - Multiple sources for tool discovery
-4. **External MCP Aggregation** - Connect to other MCP servers
-
-## Key Components
-
-### McpServer
-The main server component that handles MCP JSON-RPC 2.0 protocol.
-
-### LazyToolManager  
-Manages tool loading with on-demand loading and LRU caching.
-
-### ToolRegistry (from op-tools)
-Provides tool storage with usage tracking and LRU eviction.
-
-### ToolDiscoverySystem (from op-tools)
-Manages tool discovery from multiple sources.
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MCP_MAX_TOOLS` | 50 | Max tools to keep loaded |
-| `MCP_IDLE_SECS` | 300 | Idle time before eviction |
-| `MCP_DBUS_DISCOVERY` | true | Enable D-Bus discovery |
-| `MCP_PLUGIN_DISCOVERY` | true | Enable plugin discovery |
-| `MCP_AGENT_DISCOVERY` | true | Enable agent discovery |
-| `MCP_PRELOAD` | true | Preload essential tools |
-"#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_server_creation() {
-        let config = McpServerConfig {
-            tool_config: LazyToolConfig {
-                enable_dbus_discovery: false,
-                enable_plugin_discovery: false,
-                enable_agent_discovery: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let server = McpServer::new(config).await.unwrap();
-        assert_eq!(server.config.name, "op-mcp");
+    
+    /// Check if client should use compact mode
+    fn should_use_compact_mode(client_name: &str) -> bool {
+        let name_lower = client_name.to_lowercase();
+        name_lower.contains("gemini") ||
+        name_lower.contains("claude") ||
+        name_lower.contains("cursor")
     }
-
-    #[tokio::test]
-    async fn test_initialize_handler() {
-        let config = McpServerConfig {
-            tool_config: LazyToolConfig {
-                enable_dbus_discovery: false,
-                enable_plugin_discovery: false,
-                enable_agent_discovery: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let server = McpServer::new(config).await.unwrap();
-
-        let request = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(1)),
-            method: "initialize".to_string(),
-            params: None,
-        };
-
-        let response = server.handle_request(request).await;
-        assert!(response.result.is_some());
-        assert!(response.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_tools_list_handler() {
-        let config = McpServerConfig {
-            tool_config: LazyToolConfig {
-                enable_dbus_discovery: false,
-                enable_plugin_discovery: false,
-                enable_agent_discovery: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let server = McpServer::new(config).await.unwrap();
-
-        let request = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(json!(2)),
-            method: "tools/list".to_string(),
-            params: None,
-        };
-
-        let response = server.handle_request(request).await;
-        assert!(response.result.is_some());
-
-        let result = response.result.unwrap();
-        assert!(result.get("tools").is_some());
+    
+    /// Get tool executor reference
+    pub fn tool_executor(&self) -> &Arc<dyn ToolExecutor> {
+        &self.tool_executor
     }
 }

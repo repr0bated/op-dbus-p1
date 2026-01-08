@@ -8,7 +8,7 @@
 //! - Provides unified JSON responses
 
 use anyhow::Result;
-use op_core::{ExecutionTracker, ExecutionMetrics, ExecutionTelemetry};
+use op_execution_tracker::{ExecutionTracker, ExecutionMetrics, ExecutionTelemetry};
 // use op_introspection::IntrospectionService;
 use op_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -195,7 +195,7 @@ impl ChatActorHandle {
 
     pub async fn execute_tool(&self, request: op_core::ToolRequest) -> RpcResponse {
         self.call(RpcRequest::ExecuteTool {
-            name: request.name,
+            name: request.tool_name.clone(),
             arguments: request.arguments,
             session_id: None,
         }).await.unwrap_or_else(|e| RpcResponse::error(e.to_string()))

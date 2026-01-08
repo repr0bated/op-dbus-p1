@@ -7,10 +7,10 @@ Requires=dbus.socket
 
 [Service]
 Type=simple
-User=jeremy
-Group=jeremy
-WorkingDirectory=/home/jeremy/git/op-dbus-v2
-EnvironmentFile=/home/jeremy/git/op-dbus-v2/.env
+User=root
+Group=root
+WorkingDirectory=/opt/op-dbus
+EnvironmentFile=/etc/op-dbus/environment
 
 # Main process
 ExecStart=/usr/local/sbin/op-web-server
@@ -18,8 +18,6 @@ ExecStart=/usr/local/sbin/op-web-server
 # Restart policy
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 # Security hardening
 NoNewPrivileges=true

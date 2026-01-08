@@ -1,164 +1,202 @@
-//! op-mcp-server: MCP Protocol Server
+//! op-mcp-server: Unified MCP Protocol Server
 //!
-//! Main entry point for the MCP server that exposes op-dbus-v2 functionality
-//! via the Model Context Protocol. This is a thin adapter that delegates
-//! all functionality to op-chat, op-tools, and op-introspection.
+//! Supports three modes:
+//!   - compact: 4 meta-tools for discovering 148+ tools (default for LLMs)
+//!   - agents:  Always-on cognitive agents (memory, sequential_thinking, rust_pro, etc.)
+//!   - full:    All tools directly exposed
 //!
-//! Supports two transport modes:
-//! - stdio (default): For MCP clients that launch the server as a subprocess
-//! - SSE (--sse): HTTP server for long-running daemon mode
+//! Supports multiple transports:
+//!   op-mcp-server                           # stdio, compact mode
+//!   op-mcp-server --mode agents             # stdio, agents mode (starts rust_pro, memory, etc.)
+//!   op-mcp-server --http 0.0.0.0:3001       # HTTP+SSE
+//!   op-mcp-server --ws 0.0.0.0:3002         # WebSocket
+//!   op-mcp-server --all                     # All transports
 //!
-//! Usage:
-//!   op-mcp-server              # stdio mode (for MCP clients)
-//!   op-mcp-server --sse        # SSE mode on 127.0.0.1:3001
-//!   op-mcp-server --sse --bind 0.0.0.0:8090  # Custom bind address
+//! Run-On-Connection Agents (started automatically when client connects):
+//!   - rust_pro         : Rust development (cargo check/build/test/clippy)
+//!   - backend_architect: System design and architecture
+//!   - sequential_thinking: Step-by-step reasoning
+//!   - memory           : Key-value session memory
+//!   - context_manager  : Persistent context across sessions
+//!
+//! Example configurations:
+//!   # Agents MCP (recommended for development)
+//!   op-mcp-server --mode agents --http 0.0.0.0:3002
+//!
+//!   # Compact MCP (for Cursor, Gemini CLI, etc.)
+//!   op-mcp-server --mode compact --http 0.0.0.0:3001
+//!
+//!   # Both servers on different ports
+//!   op-mcp-server --mode compact --http 0.0.0.0:3001 &
+//!   op-mcp-server --mode agents --http 0.0.0.0:3002 &
 
 use anyhow::Result;
-use op_chat::{ChatActor, ChatActorConfig};
-use op_mcp::{McpRequest, McpServer, ResourceRegistry, run_sse_server};
-use op_tools::ToolRegistry;
-use tokio::io::BufReader;
+use clap::Parser;
+use op_mcp::{
+    McpServer, McpServerConfig,
+    AgentsServer, AgentsServerConfig,
+    ServerMode,
+    transport::{Transport, StdioTransport, HttpSseTransport, WebSocketTransport},
+};
 use std::sync::Arc;
-use std::env;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tracing::{info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 
-/// Main entry point
+#[derive(Parser)]
+#[command(name = "op-mcp-server")]
+#[command(about = "Unified MCP Protocol Server")]
+struct Cli {
+    /// Server mode: compact (4 meta-tools), agents (always-on), full (all tools)
+    #[arg(long, short, default_value = "compact")]
+    mode: String,
+    
+    /// Run stdio transport (default if no network transport specified)
+    #[arg(long)]
+    stdio: bool,
+    
+    /// Run HTTP+SSE transport on specified address
+    #[arg(long, value_name = "ADDR")]
+    http: Option<String>,
+    
+    /// Run SSE-only transport on specified address
+    #[arg(long, value_name = "ADDR")]
+    sse: Option<String>,
+    
+    /// Run WebSocket transport on specified address
+    #[arg(long, value_name = "ADDR")]
+    ws: Option<String>,
+    
+    /// Run gRPC transport on specified address
+    #[cfg(feature = "grpc")]
+    #[arg(long, value_name = "ADDR")]
+    grpc: Option<String>,
+    
+    /// Run all transports with default addresses
+    #[arg(long)]
+    all: bool,
+    
+    /// Disable auto-start of run-on-connection agents (agents mode only)
+    #[arg(long)]
+    no_auto_start: bool,
+    
+    /// Log level
+    #[arg(long, default_value = "info")]
+    log_level: String,
+    
+    /// Server name override
+    #[arg(long)]
+    name: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load environment from /etc/op-dbus/environment (if exists)
-    op_core::config::load_environment();
+    let cli = Cli::parse();
+    
+    // Initialize logging (stderr to not interfere with stdio transport)
+    let level = match cli.log_level.as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::INFO,
+    };
+    
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+    
+    // Parse server mode
+    let mode: ServerMode = cli.mode.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+    
+    info!(mode = %mode, "Starting op-mcp-server");
+    
+    // Determine transports
+    let run_stdio = cli.stdio || cli.all || 
+        (cli.http.is_none() && cli.sse.is_none() && cli.ws.is_none());
+    let http_addr = cli.http.or(cli.sse).or(if cli.all { Some("0.0.0.0:3001".into()) } else { None });
+    let ws_addr = cli.ws.or(if cli.all { Some("0.0.0.0:3002".into()) } else { None });
+    
+    // Create and run server based on mode
+    match mode {
+        ServerMode::Compact | ServerMode::Full => {
+            let config = McpServerConfig {
+                name: cli.name,
+                compact_mode: mode == ServerMode::Compact,
+                ..Default::default()
+            };
+            
+            let server = McpServer::new(config).await?;
+            info!(mode = %mode, "MCP server initialized");
+            
+            run_transports(server, run_stdio, http_addr, ws_addr).await
+        }
+        
+        ServerMode::Agents => {
+            let config = AgentsServerConfig {
+                name: cli.name.or(Some("op-mcp-agents".to_string())),
+                auto_start_agents: !cli.no_auto_start,
+                ..Default::default()
+            };
+            
+            let server = Arc::new(AgentsServer::new(config));
+            
+            // Log run-on-connection agents
+            let roc_agents: Vec<_> = server.run_on_connection_agents()
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect();
+            info!(
+                run_on_connection = ?roc_agents,
+                total = server.enabled_agents().len(),
+                "Agents MCP server initialized"
+            );
+            
+            run_transports(server, run_stdio, http_addr, ws_addr).await
+        }
+    }
+}
 
-    // Parse command line args
-    let args: Vec<String> = env::args().collect();
-    let use_sse = args.iter().any(|a| a == "--sse");
-    let bind_addr = args.iter()
-        .position(|a| a == "--bind")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str())
-        .unwrap_or("127.0.0.1:3001");
-
-    // Initialize logging (stderr for stdio mode, stdout for SSE)
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "op_mcp=info,tokio=warn,warn".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-
-    info!("Starting op-mcp-server (mode: {})", if use_sse { "SSE" } else { "stdio" });
-
-    // Create tool registry and register tools
-    let tool_registry = Arc::new(ToolRegistry::new());
-    register_all_tools(&tool_registry).await?;
-
-    // Create ChatActor with configured registry
-    let config = ChatActorConfig::default();
-    let (chat_actor, chat_handle) = ChatActor::with_registry(config, tool_registry).await?;
-    tokio::spawn(chat_actor.run());
-
-    info!("ChatActor started, ready to handle MCP requests");
-
-    // Create MCP server
-    let resource_registry = ResourceRegistry::new();
-    let mcp_server = Arc::new(McpServer::new(chat_handle, resource_registry));
-
-    // Run in selected mode
-    if use_sse {
-        info!("Starting SSE transport on {}", bind_addr);
-        run_sse_server(mcp_server, bind_addr).await?;
+async fn run_transports<H>(
+    server: Arc<H>,
+    run_stdio: bool,
+    http_addr: Option<String>,
+    ws_addr: Option<String>,
+) -> Result<()>
+where
+    H: op_mcp::transport::McpHandler + 'static,
+{
+    let mut handles = Vec::new();
+    
+    // Spawn HTTP+SSE transport
+    if let Some(addr) = http_addr {
+        let server = server.clone();
+        handles.push(tokio::spawn(async move {
+            info!(addr = %addr, "Starting HTTP+SSE transport");
+            HttpSseTransport::new(addr).serve(server).await
+        }));
+    }
+    
+    // Spawn WebSocket transport
+    if let Some(addr) = ws_addr {
+        let server = server.clone();
+        handles.push(tokio::spawn(async move {
+            info!(addr = %addr, "Starting WebSocket transport");
+            WebSocketTransport::new(addr).serve(server).await
+        }));
+    }
+    
+    // Run stdio in main thread if enabled (blocks)
+    if run_stdio {
+        info!("Starting stdio transport");
+        StdioTransport::new().serve(server).await?;
     } else {
-        run_mcp_protocol(mcp_server).await?;
-    }
-
-    info!("op-mcp-server shutting down");
-    Ok(())
-}
-
-async fn register_all_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
-    op_tools::register_builtin_tools(registry).await?;
-    register_agent_tools(registry).await?;
-    op_tools::builtin::register_shell_tools(registry).await?;
-    Ok(())
-}
-
-async fn register_agent_tools(registry: &Arc<ToolRegistry>) -> Result<()> {
-    let descriptors = op_agents::builtin_agent_descriptors();
-    let mut count = 0usize;
-
-    for descriptor in descriptors {
-        let tool = op_tools::builtin::create_agent_tool(
-            &descriptor.agent_type,
-            &format!("{} - {}", descriptor.name, descriptor.description),
-            &descriptor.operations,
-            serde_json::json!({ "agent_type": descriptor.agent_type }),
-        )?;
-
-        if registry.get_definition(tool.name()).await.is_some() {
-            continue;
-        }
-
-        registry.register_tool(tool).await?;
-        count += 1;
-    }
-
-    info!("Registered {} agent tools", count);
-    Ok(())
-}
-
-/// Run the MCP protocol loop over stdio
-async fn run_mcp_protocol(mcp_server: Arc<McpServer>) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-
-    let mut stdout_writer = stdout;
-    let mut lines = BufReader::new(stdin).lines();
-
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Parse MCP request
-        let request: Result<McpRequest, _> = serde_json::from_str(line);
-        match request {
-            Ok(mcp_request) => {
-                info!("Received MCP request: {}", mcp_request.method);
-
-                // Handle the request
-                let response = mcp_server.handle_request(mcp_request).await;
-
-                // Send response
-                let response_json = serde_json::to_string(&response)?;
-                stdout_writer.write_all(response_json.as_bytes()).await?;
-                stdout_writer.write_all(b"\n").await?;
-                stdout_writer.flush().await?;
-
-                info!("Response sent");
-            }
-            Err(e) => {
-                warn!("Failed to parse MCP request: {}", e);
-                
-                // Send error response
-                let error_response = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {
-                        "code": -32700,
-                        "message": "Parse error"
-                    }
-                });
-
-                let error_json = serde_json::to_string(&error_response)?;
-                stdout_writer.write_all(error_json.as_bytes()).await?;
-                stdout_writer.write_all(b"\n").await?;
-                stdout_writer.flush().await?;
-            }
+        // Wait for spawned transports
+        for handle in handles {
+            handle.await??;
         }
     }
-
+    
     Ok(())
 }

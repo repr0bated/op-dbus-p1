@@ -1,0 +1,19 @@
+{
+    "mcpServers": {
+        "op-dbus-compact": {
+            "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/compact",
+            "transport": "sse",
+            "description": "Compact op-dbus MCP with meta-tools (list_tools, search_tools, get_tool_schema, execute_tool) - Recommended for AI clients with limited context"
+        },
+        "op-dbus-standard": {
+            "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/sse",
+            "transport": "sse",
+            "description": "Standard op-dbus MCP server exposing all tools directly"
+        },
+        "op-dbus-agents": {
+            "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/agents",
+            "transport": "sse",
+            "description": "Critical agents MCP - memory, context_manager, sequential_thinking, mem0, search_specialist, deployment, python_pro, debugger, prompt_engineer"
+        }
+    }
+}

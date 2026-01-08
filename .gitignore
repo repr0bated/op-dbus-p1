@@ -103,7 +103,6 @@ disaster.md
 # Scripts and tools (development-specific)
 repository_comparison_script.sh
 check_ovs.sh
-*.sh
 gemini-mcp-wrapper.py
 
 # Cursor-specific files

@@ -1,8 +1,9 @@
 {
   "mcpServers": {
-    "op-dbus-antigravity": {
-      "serverUrl": "http://127.0.0.1:8080/mcp/profile/antigravity",
-      "description": "Complete op-dbus MCP server with all agents (excludes direct server config)"
+    "op-dbus-agents": {
+      "serverUrl": "https://op-dbus.ghostbridge.tech/mcp/agents",
+      "transport": "sse",
+      "description": "Critical agents MCP - memory, context_manager, sequential_thinking, mem0, search_specialist, deployment, python_pro, debugger, prompt_engineer"
     }
   }
 }
