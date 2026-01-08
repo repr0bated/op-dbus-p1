@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
 
 # Time
 chrono = { workspace = true }

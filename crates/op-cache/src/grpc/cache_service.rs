@@ -12,10 +12,10 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use super::proto::{
-    cache_service_server::CacheService, CacheStats, CleanupRequest, CleanupResponse,
+    cache_service_server::CacheService, CacheStats, CleanupRequest, CleanupResponse, Empty,
     GetStepRequest, GetStepResponse, GetWorkstackStatsRequest, InvalidateStepRequest,
-    InvalidateStepResponse, InvalidateWorkstackRequest, InvalidateWorkstackResponse,
-    PutStepRequest, PutStepResponse, WorkstackCacheStats,
+    InvalidateStepResponse, InvalidateWorkstackRequest, InvalidateWorkstackResponse, PutStepRequest,
+    PutStepResponse, WorkstackCacheStats,
 };
 
 /// Cached step entry
@@ -337,7 +337,7 @@ impl CacheService for CacheServiceImpl {
 
     async fn get_stats(
         &self,
-        _request: Request<()>,
+        _request: Request<Empty>,
     ) -> Result<Response<CacheStats>, Status> {
         Ok(Response::new(self.get_stats_internal().await))
     }

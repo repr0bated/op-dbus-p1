@@ -17,6 +17,7 @@ op-execution-tracker = { path = "../crates/op-execution-tracker" }
 op-state = { path = "../crates/op-state" }
 op-blockchain = { path = "../crates/op-blockchain" }
 op-plugins = { path = "../crates/op-plugins" }
+op-cache = { path = "../crates/op-cache" }
 
 # Third-party
 tokio = { workspace = true, features = ["full"] }
@@ -28,3 +29,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 zbus = { workspace = true }
 uuid = { workspace = true }
+tonic = "0.11"

@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use super::agent_service::AgentServiceImpl;
 use super::cache_service::CacheServiceImpl;
 use super::proto::{
-    orchestrator_service_server::OrchestratorService, Capability, ExecuteAgentsRequest,
+    orchestrator_service_server::OrchestratorService, Capability, Empty, ExecuteAgentsRequest,
     GetPatternsResponse, OrchestratorRequest, OrchestratorResponse, OrchestratorStats,
     PatternSuggestion, PromotePatternRequest, PromotePatternResponse, ResolveRequest,
     ResolveResponse, WorkstackStepResult,
@@ -626,7 +626,7 @@ impl OrchestratorService for OrchestratorServiceImpl {
 
     async fn get_patterns(
         &self,
-        _request: Request<()>,
+        _request: Request<Empty>,
     ) -> Result<Response<GetPatternsResponse>, Status> {
         let patterns = self.patterns.read().await;
 
@@ -689,7 +689,7 @@ impl OrchestratorService for OrchestratorServiceImpl {
 
     async fn get_stats(
         &self,
-        _request: Request<()>,
+        _request: Request<Empty>,
     ) -> Result<Response<OrchestratorStats>, Status> {
         let agents_response = self
             .agent_service
@@ -701,7 +701,7 @@ impl OrchestratorService for OrchestratorServiceImpl {
 
         let caps_response = self
             .agent_service
-            .list_capabilities(Request::new(()))
+            .list_capabilities(Request::new(Empty {}))
             .await?
             .into_inner();
 

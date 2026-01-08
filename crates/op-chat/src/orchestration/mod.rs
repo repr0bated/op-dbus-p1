@@ -53,6 +53,7 @@
 
 pub mod error;
 pub mod grpc_pool;
+pub mod skills;
 pub mod workstack_executor;
 
 // Re-exports
@@ -61,6 +62,7 @@ pub use grpc_pool::{
     AgentPoolConfig, GrpcAgentPool, AgentOperation, AgentOperationResult,
     PoolStatus, StreamChunk, StreamType, AgentHealth, CircuitState,
 };
+pub use skills::{Skill, SkillMetadata, SkillRegistry};
 pub use workstack_executor::{
     Workstack, WorkstackPhase, PhaseToolCall, PhaseStatus,
     WorkstackExecutor, WorkstackResult, PhaseResult, ToolResult, AgentResult,

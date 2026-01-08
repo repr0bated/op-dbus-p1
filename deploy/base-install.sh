@@ -57,6 +57,18 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+install_packages() {
+    if command -v op-packagekit-install &> /dev/null; then
+        if ! op-packagekit-install "$@"; then
+            log_warn "op-packagekit-install failed, falling back to apt-get"
+            apt-get install -y "$@"
+        fi
+        return
+    fi
+
+    apt-get install -y "$@"
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root"
@@ -82,7 +94,7 @@ install_system_deps() {
     apt-get update
     
     # Core build tools
-    apt-get install -y \
+    install_packages \
         build-essential \
         pkg-config \
         libssl-dev \
@@ -94,7 +106,7 @@ install_system_deps() {
         jq
     
     # Runtime dependencies
-    apt-get install -y \
+    install_packages \
         nginx \
         sqlite3 \
         dbus \
@@ -104,7 +116,7 @@ install_system_deps() {
     if ! command -v node &> /dev/null; then
         log_info "Installing Node.js..."
         curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
+        install_packages nodejs
     fi
     
     log_success "System dependencies installed"

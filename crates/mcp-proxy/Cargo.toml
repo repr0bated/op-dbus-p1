@@ -1,0 +1,15 @@
+[package]
+name = "mcp-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tonic = "0.11"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+op-cache = { path = "../op-cache" }

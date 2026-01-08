@@ -19,5 +19,5 @@ pub use server::{GrpcServer, GrpcServerConfig};
 
 // Re-export generated protobuf types
 pub mod proto {
-    tonic::include_proto!("op_cache");
+    pub use crate::proto::*;
 }
