@@ -34,6 +34,14 @@ impl McpServiceImpl {
 
     async fn handle_tool_call(&self, params: &Value) -> Result<Vec<u8>, McpError> {
         let tool_name = params["name"].as_str().unwrap_or("");
+        if tool_name.is_empty() {
+            return Err(McpError {
+                code: -32602,
+                message: "Invalid params: tool name is required".to_string(),
+                data: Vec::new(),
+            });
+        }
+        
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
         let tool = self.registry.get(tool_name).await.ok_or_else(|| McpError {
