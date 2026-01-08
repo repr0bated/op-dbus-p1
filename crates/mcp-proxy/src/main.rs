@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         let grpc_request = McpRequest {
             jsonrpc: "2.0".to_string(),
             method: json_request["method"].as_str().unwrap_or("").to_string(),
-            id: json_request["id"].to_string(),
+            id: json_request["id"].as_str().unwrap_or("null").to_string(),
             params: serde_json::to_vec(&json_request["params"]).unwrap_or_default(),
         };
 
