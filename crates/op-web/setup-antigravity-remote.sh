@@ -37,7 +37,7 @@ echo ""
 echo "Step 1: Install HTTP MCP proxy servers"
 echo "----------------------------------------"
 echo "# Build the HTTP MCP proxy"
-echo "cd /home/jeremy/op-dbus-v2/crates/op-mcp"
+echo "cd /home/jeremy/git/op-dbus-p1/crates/op-mcp"
 echo "cargo build --release --bin mcp-http-proxy"
 echo ""
 

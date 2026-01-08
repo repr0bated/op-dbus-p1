@@ -29,6 +29,8 @@ use op_agents::agents::orchestration::mem0_wrapper::Mem0WrapperAgent;
 use op_agents::agents::seo::search_specialist::SearchSpecialistAgent;
 use op_agents::agents::infrastructure::deployment::DeploymentAgent;
 use op_agents::agents::language::python_pro::PythonProAgent;
+use op_agents::agents::language::rust_pro::RustProAgent;
+use op_agents::agents::architecture::BackendArchitectAgent;
 use op_agents::agents::analysis::debugger::DebuggerAgent;
 use op_agents::agents::aiml::prompt_engineer::PromptEngineerAgent;
 
@@ -96,10 +98,14 @@ impl CriticalAgentsState {
             Arc::new(ContextManagerAgent::new("context_manager".to_string())),
             Arc::new(SequentialThinkingAgent::new("sequential_thinking".to_string())),
             Arc::new(Mem0WrapperAgent::new("mem0".to_string())),
+            // Language agents
+            Arc::new(RustProAgent::new("rust_pro".to_string())),
+            Arc::new(PythonProAgent::new("python_pro".to_string())),
+            // Architecture agents
+            Arc::new(BackendArchitectAgent::new("backend_architect".to_string())),
             // Additional requested agents
             Arc::new(SearchSpecialistAgent::new("search_specialist".to_string())),
             Arc::new(DeploymentAgent::new("deployment".to_string())),
-            Arc::new(PythonProAgent::new("python_pro".to_string())),
             Arc::new(DebuggerAgent::new("debugger".to_string())),
             Arc::new(PromptEngineerAgent::new("prompt_engineer".to_string())),
         ];

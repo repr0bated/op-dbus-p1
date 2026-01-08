@@ -1,0 +1,552 @@
+syntax = "proto3";
+
+package op_cache;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// ============================================================================
+// Core Types
+// ============================================================================
+
+// Agent capabilities - what an agent can do
+enum Capability {
+    CAPABILITY_UNSPECIFIED = 0;
+    
+    // Analysis
+    CAPABILITY_CODE_ANALYSIS = 1;
+    CAPABILITY_SECURITY_AUDIT = 2;
+    CAPABILITY_PERFORMANCE_ANALYSIS = 3;
+    CAPABILITY_DEPENDENCY_ANALYSIS = 4;
+    
+    // Generation
+    CAPABILITY_CODE_GENERATION = 10;
+    CAPABILITY_TEST_GENERATION = 11;
+    CAPABILITY_DOCUMENTATION_GENERATION = 12;
+    CAPABILITY_REFACTORING_SUGGESTION = 13;
+    
+    // Transformation
+    CAPABILITY_CODE_TRANSFORMATION = 20;
+    CAPABILITY_FORMAT_CONVERSION = 21;
+    CAPABILITY_LANGUAGE_TRANSLATION = 22;
+    
+    // Data
+    CAPABILITY_DATA_EXTRACTION = 30;
+    CAPABILITY_DATA_VALIDATION = 31;
+    CAPABILITY_DATA_ENRICHMENT = 32;
+    CAPABILITY_EMBEDDING = 33;
+    
+    // Reasoning
+    CAPABILITY_PLANNING = 40;
+    CAPABILITY_SUMMARIZATION = 41;
+    CAPABILITY_QUESTION_ANSWERING = 42;
+    CAPABILITY_CLASSIFICATION = 43;
+    
+    // Integration
+    CAPABILITY_API_CALL = 50;
+    CAPABILITY_DATABASE_QUERY = 51;
+    CAPABILITY_FILE_OPERATION = 52;
+    CAPABILITY_SHELL_EXECUTION = 53;
+}
+
+// Agent priority for execution ordering
+enum Priority {
+    PRIORITY_UNSPECIFIED = 0;
+    PRIORITY_HIGH = 1;      // Execute first (validation, security)
+    PRIORITY_NORMAL = 2;    // Normal order
+    PRIORITY_LOW = 3;       // Execute last (formatting, cleanup)
+}
+
+// Agent definition
+message Agent {
+    string id = 1;
+    string name = 2;
+    string description = 3;
+    repeated Capability capabilities = 4;    // What this agent CAN DO
+    repeated Capability requires = 5;        // What this agent NEEDS as input
+    Priority priority = 6;
+    bool parallelizable = 7;
+    uint64 estimated_latency_ms = 8;
+    uint64 max_input_size = 9;
+    string version = 10;
+    bool enabled = 11;
+    map<string, string> metadata = 12;
+}
+
+// ============================================================================
+// Agent Service - Register and execute agents
+// ============================================================================
+
+service AgentService {
+    // Register an agent with its capabilities
+    rpc Register(RegisterAgentRequest) returns (RegisterAgentResponse);
+    
+    // Unregister an agent
+    rpc Unregister(UnregisterAgentRequest) returns (UnregisterAgentResponse);
+    
+    // Execute a single agent
+    rpc Execute(ExecuteAgentRequest) returns (ExecuteAgentResponse);
+    
+    // Execute agent with streaming output
+    rpc ExecuteStream(ExecuteAgentRequest) returns (stream ExecuteAgentChunk);
+    
+    // Get agent by ID
+    rpc GetAgent(GetAgentRequest) returns (Agent);
+    
+    // List all agents
+    rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+    
+    // Find agents by capability
+    rpc FindByCapability(FindByCapabilityRequest) returns (FindByCapabilityResponse);
+    
+    // List all available capabilities
+    rpc ListCapabilities(google.protobuf.Empty) returns (ListCapabilitiesResponse);
+    
+    // Health check for agent
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message RegisterAgentRequest {
+    Agent agent = 1;
+    string endpoint = 2;  // gRPC endpoint if remote agent
+}
+
+message RegisterAgentResponse {
+    bool success = 1;
+    string agent_id = 2;
+    string error = 3;
+}
+
+message UnregisterAgentRequest {
+    string agent_id = 1;
+}
+
+message UnregisterAgentResponse {
+    bool success = 1;
+    Agent removed_agent = 2;
+}
+
+message ExecuteAgentRequest {
+    string agent_id = 1;
+    bytes input = 2;
+    map<string, string> context = 3;
+    uint64 timeout_ms = 4;
+}
+
+message ExecuteAgentResponse {
+    bytes output = 1;
+    uint64 latency_ms = 2;
+    bool success = 3;
+    string error = 4;
+    map<string, string> metadata = 5;
+}
+
+message ExecuteAgentChunk {
+    bytes data = 1;
+    bool is_final = 2;
+    uint64 sequence = 3;
+}
+
+message GetAgentRequest {
+    string agent_id = 1;
+}
+
+message ListAgentsRequest {
+    bool enabled_only = 1;
+}
+
+message ListAgentsResponse {
+    repeated Agent agents = 1;
+}
+
+message FindByCapabilityRequest {
+    repeated Capability capabilities = 1;
+    bool match_all = 2;  // true = agent must have ALL capabilities
+}
+
+message FindByCapabilityResponse {
+    repeated Agent agents = 1;
+}
+
+message ListCapabilitiesResponse {
+    repeated Capability capabilities = 1;
+    map<int32, int32> capability_agent_count = 2;  // capability -> number of agents
+}
+
+message HealthCheckRequest {
+    string agent_id = 1;
+}
+
+message HealthCheckResponse {
+    bool healthy = 1;
+    string status = 2;
+    uint64 uptime_seconds = 3;
+}
+
+// ============================================================================
+// Orchestrator Service - Route requests and manage workstacks
+// ============================================================================
+
+service OrchestratorService {
+    // Execute request by capabilities (orchestrator resolves to agents)
+    rpc Execute(OrchestratorRequest) returns (OrchestratorResponse);
+    
+    // Execute with streaming results per step
+    rpc ExecuteStream(OrchestratorRequest) returns (stream WorkstackStepResult);
+    
+    // Execute explicit agent sequence
+    rpc ExecuteAgents(ExecuteAgentsRequest) returns (OrchestratorResponse);
+    
+    // Resolve capabilities to agent sequence (without executing)
+    rpc Resolve(ResolveRequest) returns (ResolveResponse);
+    
+    // Get pattern suggestions for promotion
+    rpc GetPatterns(google.protobuf.Empty) returns (GetPatternsResponse);
+    
+    // Promote a pattern to named workstack
+    rpc PromotePattern(PromotePatternRequest) returns (PromotePatternResponse);
+    
+    // Get orchestrator stats
+    rpc GetStats(google.protobuf.Empty) returns (OrchestratorStats);
+}
+
+message OrchestratorRequest {
+    string request_id = 1;
+    repeated Capability required_capabilities = 2;
+    bytes input = 3;
+    repeated string preferred_agents = 4;
+    repeated string excluded_agents = 5;
+    bool allow_parallel = 6;
+    uint32 max_agents = 7;
+    map<string, string> context = 8;
+}
+
+message OrchestratorResponse {
+    string request_id = 1;
+    bytes output = 2;
+    repeated WorkstackStepResult steps = 3;
+    uint64 total_latency_ms = 4;
+    uint32 cache_hits = 5;
+    uint32 cache_misses = 6;
+    bool used_workstack = 7;
+    repeated string resolved_agents = 8;
+    repeated Capability fulfilled_capabilities = 9;
+    repeated Capability missing_capabilities = 10;
+}
+
+message ExecuteAgentsRequest {
+    string request_id = 1;
+    repeated string agent_ids = 2;
+    bytes input = 3;
+    map<string, string> context = 4;
+}
+
+message WorkstackStepResult {
+    uint32 step_index = 1;
+    string agent_id = 2;
+    bytes output = 3;
+    uint64 latency_ms = 4;
+    bool cached = 5;
+    uint64 output_size = 6;
+    bool success = 7;
+    string error = 8;
+}
+
+message ResolveRequest {
+    repeated Capability required_capabilities = 1;
+    repeated string preferred_agents = 2;
+    repeated string excluded_agents = 3;
+}
+
+message ResolveResponse {
+    repeated Agent agents = 1;
+    repeated Capability fulfilled_capabilities = 2;
+    repeated Capability missing_capabilities = 3;
+    uint64 estimated_latency_ms = 4;
+    repeated string resolution_path = 5;
+}
+
+message GetPatternsResponse {
+    repeated PatternSuggestion patterns = 1;
+}
+
+message PatternSuggestion {
+    string pattern_id = 1;
+    repeated string agent_sequence = 2;
+    uint32 call_count = 3;
+    uint64 avg_latency_ms = 4;
+    string suggested_name = 5;
+    double confidence_score = 6;
+    uint64 estimated_time_saved_ms = 7;
+}
+
+message PromotePatternRequest {
+    string pattern_id = 1;
+    string workstack_name = 2;  // Optional custom name
+}
+
+message PromotePatternResponse {
+    bool success = 1;
+    string workstack_id = 2;
+    string error = 3;
+}
+
+message OrchestratorStats {
+    uint32 registered_agents = 1;
+    uint32 enabled_agents = 2;
+    uint32 available_capabilities = 3;
+    uint32 tracked_patterns = 4;
+    uint32 promoted_patterns = 5;
+    uint64 cache_entries = 6;
+    double cache_hit_rate = 7;
+    uint32 numa_nodes = 8;
+}
+
+// ============================================================================
+// Cache Service - Workstack step caching
+// ============================================================================
+
+service CacheService {
+    // Get cached step result
+    rpc GetStep(GetStepRequest) returns (GetStepResponse);
+    
+    // Store step result
+    rpc PutStep(PutStepRequest) returns (PutStepResponse);
+    
+    // Invalidate workstack cache
+    rpc InvalidateWorkstack(InvalidateWorkstackRequest) returns (InvalidateWorkstackResponse);
+    
+    // Invalidate specific step
+    rpc InvalidateStep(InvalidateStepRequest) returns (InvalidateStepResponse);
+    
+    // Cleanup expired entries
+    rpc Cleanup(CleanupRequest) returns (CleanupResponse);
+    
+    // Get cache stats
+    rpc GetStats(google.protobuf.Empty) returns (CacheStats);
+    
+    // Get workstack-specific stats
+    rpc GetWorkstackStats(GetWorkstackStatsRequest) returns (WorkstackCacheStats);
+}
+
+message GetStepRequest {
+    string workstack_id = 1;
+    uint32 step_index = 2;
+    string input_hash = 3;
+}
+
+message GetStepResponse {
+    bool found = 1;
+    bytes output = 2;
+    uint64 created_at = 3;
+    uint64 expires_at = 4;
+    uint32 access_count = 5;
+}
+
+message PutStepRequest {
+    string workstack_id = 1;
+    uint32 step_index = 2;
+    string input_hash = 3;
+    bytes output = 4;
+    int64 ttl_seconds = 5;  // 0 = use default
+}
+
+message PutStepResponse {
+    bool success = 1;
+    string cache_key = 2;
+    uint64 size_bytes = 3;
+    bool compressed = 4;
+}
+
+message InvalidateWorkstackRequest {
+    string workstack_id = 1;
+}
+
+message InvalidateWorkstackResponse {
+    uint32 entries_removed = 1;
+}
+
+message InvalidateStepRequest {
+    string workstack_id = 1;
+    uint32 step_index = 2;
+}
+
+message InvalidateStepResponse {
+    uint32 entries_removed = 1;
+}
+
+message CleanupRequest {
+    bool expired_only = 1;
+    uint64 max_age_seconds = 2;  // 0 = use default
+}
+
+message CleanupResponse {
+    uint32 entries_removed = 1;
+    uint64 bytes_freed = 2;
+}
+
+message CacheStats {
+    uint64 total_entries = 1;
+    uint64 total_size_bytes = 2;
+    uint64 hot_entries = 3;
+    uint64 expired_entries = 4;
+    uint64 total_hits = 5;
+    uint64 total_misses = 6;
+    uint64 workstacks_cached = 7;
+    double hit_rate = 8;
+}
+
+message GetWorkstackStatsRequest {
+    string workstack_id = 1;
+}
+
+message WorkstackCacheStats {
+    string workstack_id = 1;
+    uint64 total_entries = 2;
+    uint64 total_size_bytes = 3;
+    uint64 hit_count = 4;
+    uint64 miss_count = 5;
+    double hit_rate = 6;
+}
+
+// ============================================================================
+// Embedding Service - Vector embeddings with caching
+// ============================================================================
+
+service EmbeddingService {
+    // Get or compute embedding
+    rpc GetOrCompute(GetOrComputeRequest) returns (EmbeddingResponse);
+    
+    // Get embedding if cached
+    rpc Get(GetEmbeddingRequest) returns (EmbeddingResponse);
+    
+    // Store embedding directly
+    rpc Put(PutEmbeddingRequest) returns (PutEmbeddingResponse);
+    
+    // Batch get/compute
+    rpc BatchGetOrCompute(BatchGetOrComputeRequest) returns (BatchEmbeddingResponse);
+    
+    // Get embedding stats
+    rpc GetStats(google.protobuf.Empty) returns (EmbeddingStats);
+}
+
+message GetOrComputeRequest {
+    string text = 1;
+    string model = 2;  // Optional model identifier
+}
+
+message GetEmbeddingRequest {
+    string text = 1;
+}
+
+message EmbeddingResponse {
+    bool found = 1;
+    bool computed = 2;
+    repeated float vector = 3;
+    uint32 dimensions = 4;
+}
+
+message PutEmbeddingRequest {
+    string text = 1;
+    repeated float vector = 2;
+}
+
+message PutEmbeddingResponse {
+    bool success = 1;
+    string text_hash = 2;
+}
+
+message BatchGetOrComputeRequest {
+    repeated string texts = 1;
+    string model = 2;
+}
+
+message BatchEmbeddingResponse {
+    repeated EmbeddingResponse embeddings = 1;
+    uint32 cache_hits = 2;
+    uint32 computed = 3;
+}
+
+message EmbeddingStats {
+    uint64 total_embeddings = 1;
+    uint64 total_size_bytes = 2;
+    uint64 total_accesses = 3;
+    uint64 hot_embeddings = 4;
+    double avg_dimensions = 5;
+}
+
+// ============================================================================
+// Snapshot Service - BTRFS snapshot management
+// ============================================================================
+
+service SnapshotService {
+    // Create snapshot
+    rpc Create(google.protobuf.Empty) returns (CreateSnapshotResponse);
+    
+    // List snapshots
+    rpc List(google.protobuf.Empty) returns (ListSnapshotsResponse);
+    
+    // Delete snapshot
+    rpc Delete(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+    
+    // Delete all snapshots
+    rpc DeleteAll(google.protobuf.Empty) returns (DeleteAllSnapshotsResponse);
+    
+    // Stream to remote
+    rpc StreamToRemote(StreamToRemoteRequest) returns (StreamToRemoteResponse);
+    
+    // Receive from remote
+    rpc ReceiveFromRemote(ReceiveFromRemoteRequest) returns (ReceiveFromRemoteResponse);
+}
+
+message CreateSnapshotResponse {
+    bool success = 1;
+    string snapshot_path = 2;
+    string snapshot_name = 3;
+    string error = 4;
+}
+
+message ListSnapshotsResponse {
+    repeated SnapshotInfo snapshots = 1;
+}
+
+message SnapshotInfo {
+    string name = 1;
+    string path = 2;
+    google.protobuf.Timestamp created = 3;
+    uint64 counter = 4;
+}
+
+message DeleteSnapshotRequest {
+    string snapshot_path = 1;
+}
+
+message DeleteSnapshotResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message DeleteAllSnapshotsResponse {
+    uint32 deleted_count = 1;
+}
+
+message StreamToRemoteRequest {
+    string remote_host = 1;
+    string remote_path = 2;
+}
+
+message StreamToRemoteResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ReceiveFromRemoteRequest {
+    string remote_host = 1;
+    string remote_snapshot = 2;
+    string local_path = 3;
+}
+
+message ReceiveFromRemoteResponse {
+    bool success = 1;
+    string error = 2;
+}

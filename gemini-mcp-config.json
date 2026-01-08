@@ -1,14 +1,14 @@
 {
   "mcpServers": {
+    "op-dbus-compact": {
+      "serverUrl": "http://localhost:8080/mcp/compact",
+      "transport": "sse",
+      "description": "Compact op-dbus MCP with meta-tools (list_tools, search_tools, get_tool_schema, execute_tool) for efficient AI tool discovery and execution"
+    },
     "op-dbus-agents": {
       "serverUrl": "http://localhost:8080/mcp/agents",
       "transport": "sse",
       "description": "Critical agents MCP - memory, context_manager, sequential_thinking, mem0, search_specialist, deployment, python_pro, debugger, prompt_engineer"
-    },
-    "op-dbus-compact": {
-      "serverUrl": "http://localhost:8080/mcp/compact",
-      "transport": "sse",
-      "description": "Compact MCP server with 4 meta-tools: list_tools, search_tools, get_tool_schema, execute_tool"
     }
   }
 }

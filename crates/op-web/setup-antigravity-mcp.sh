@@ -13,7 +13,7 @@ mkdir -p "$ANTIGRAVITY_CONFIG_DIR"
 
 # Copy the MCP configuration
 CONFIG_FILE="$ANTIGRAVITY_CONFIG_DIR/mcp.json"
-cp /home/jeremy/op-dbus-v2/antigravity-mcp-config.json "$CONFIG_FILE"
+cp antigravity-mcp-config.json "$CONFIG_FILE"
 
 echo "✅ MCP configuration copied to: $CONFIG_FILE"
 
