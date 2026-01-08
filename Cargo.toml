@@ -24,6 +24,7 @@ members = [
     "crates/op-deployment",
     "crates/op-mcp",
     "crates/op-mcp-aggregator",
+    "crates/mcp-proxy",
     "crates/op-execution-tracker",
     "crates/op-dynamic-loader",
     "streaming-logs",

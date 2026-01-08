@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use clap::Parser;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, error};
@@ -21,6 +22,7 @@ use op_http::axum;
 mod chat;
 // mod tracker;
 mod state;
+mod grpc;
 
 use chat::ChatInterface;
 use state::StateInterface;
@@ -57,6 +59,10 @@ struct Args {
     /// Static files directory
     #[arg(long)]
     static_dir: Option<PathBuf>,
+
+    /// gRPC bind address (host:port)
+    #[arg(long, default_value = "[::1]:50051")]
+    grpc_bind: String,
 
     /// Disable CORS
     #[arg(long)]
@@ -253,7 +259,15 @@ async fn main() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    // --- 3. Setup HTTP Server ---
+    // --- 3. Setup gRPC Server ---
+
+    let grpc_addr: SocketAddr = args.grpc_bind.parse()?;
+    let grpc_registry = registry.clone();
+    let grpc_future = async move {
+        grpc::start_grpc_server(grpc_addr, grpc_registry).await
+    };
+
+    // --- 4. Setup HTTP Server ---
 
     let http_future = async {
         let mut router_builder = RouterBuilder::new();
@@ -325,11 +339,14 @@ async fn main() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    // --- 4. Run All ---
+    // --- 5. Run All ---
 
     tokio::select! {
         res = dbus_future => {
             error!("D-Bus loop exited: {:?}", res);
+        }
+        res = grpc_future => {
+            error!("gRPC server exited: {:?}", res);
         }
         res = http_future => {
             error!("HTTP server exited: {:?}", res);

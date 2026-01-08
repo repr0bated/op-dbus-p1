@@ -10,6 +10,16 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+install_packages() {
+    if command -v op-packagekit-install &> /dev/null; then
+        op-packagekit-install "$@"
+        return
+    fi
+
+    sudo apt update
+    sudo apt install -y "$@"
+}
+
 echo -e "${GREEN}================================================${NC}"
 echo -e "${GREEN}  op-web Chat - Proxmox Integration Setup${NC}"
 echo -e "${GREEN}================================================${NC}"
@@ -30,8 +40,7 @@ echo ""
 # Install Nginx
 echo -e "${YELLOW}Step 1: Installing Nginx...${NC}"
 if ! command -v nginx &> /dev/null; then
-    sudo apt update
-    sudo apt install -y nginx
+    install_packages nginx
     echo -e "${GREEN}✓ Nginx installed${NC}"
 else
     echo -e "${GREEN}✓ Nginx already installed${NC}"

@@ -11,9 +11,9 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
 
 use super::proto::{
-    agent_service_server::AgentService, Agent, Capability, ExecuteAgentChunk, ExecuteAgentRequest,
-    ExecuteAgentResponse, FindByCapabilityRequest, FindByCapabilityResponse, GetAgentRequest,
-    HealthCheckRequest, HealthCheckResponse, ListAgentsRequest, ListAgentsResponse,
+    agent_service_server::AgentService, Agent, Capability, Empty, ExecuteAgentChunk,
+    ExecuteAgentRequest, ExecuteAgentResponse, FindByCapabilityRequest, FindByCapabilityResponse,
+    GetAgentRequest, HealthCheckRequest, HealthCheckResponse, ListAgentsRequest, ListAgentsResponse,
     ListCapabilitiesResponse, RegisterAgentRequest, RegisterAgentResponse, UnregisterAgentRequest,
     UnregisterAgentResponse,
 };
@@ -354,7 +354,7 @@ impl AgentService for AgentServiceImpl {
 
     async fn list_capabilities(
         &self,
-        _request: Request<()>,
+        _request: Request<Empty>,
     ) -> Result<Response<ListCapabilitiesResponse>, Status> {
         let index = self.capability_index.read().await;
 
