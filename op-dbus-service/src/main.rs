@@ -23,11 +23,13 @@ mod chat;
 // mod tracker;
 mod state;
 mod grpc;
+mod skills;
 
 use chat::ChatInterface;
 use state::StateInterface;
 use op_plugins::prelude::PrivacyRouterPlugin;
 use op_plugins::state_plugins::privacy_router::PrivacyRouterConfig;
+use skills::register_skill_tools;
 
 #[derive(Parser, Debug)]
 #[command(name = "op-dbus-service")]
@@ -108,6 +110,7 @@ async fn main() -> Result<()> {
     // Tool Registry
     let registry = Arc::new(ToolRegistry::new());
     op_tools::register_builtin_tools(&registry).await?;
+    register_skill_tools(&registry).await?;
     info!("Initialized Tool Registry");
 
     // --- 2. Initialize Streaming Blockchain ---
