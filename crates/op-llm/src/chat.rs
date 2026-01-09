@@ -1,9 +1,25 @@
 //! Chat Manager - Manages provider switching and chat sessions
 //!
-//! Streamlined for production use with essential providers only:
-//! - Gemini 3 (Vertex AI) - Code Assist Enterprise
-//! - Claude - Anthropic premium models
-//! - OpenAI - GPT-4 and code models
+//! ## Authentication Priority
+//!
+//! 1. **Antigravity** (OAuth from headless service) - Enterprise, no charges
+//! 2. **Gemini** (API key fallback)
+//! 3. **Anthropic** (API key)
+//!
+//! ## Environment Variables
+//!
+//! ```bash
+//! # Primary: Headless OAuth (captured from Antigravity IDE)
+//! GOOGLE_AUTH_TOKEN_FILE=~/.config/antigravity/token.json
+//!
+//! # Fallback: API keys
+//! GEMINI_API_KEY=xxx
+//! ANTHROPIC_API_KEY=xxx
+//!
+//! # Provider selection
+//! LLM_PROVIDER=antigravity  # or gemini, anthropic
+//! LLM_MODEL=gemini-2.5-flash
+//! ```
 
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -20,11 +36,6 @@ use crate::provider::{
 };
 
 /// Chat manager - handles multiple providers and model selection
-///
-/// Essential providers for production use:
-/// 1. Gemini 3 (Vertex AI) - Default, included in Code Assist Enterprise
-/// 2. Claude - Anthropic premium models
-/// 3. OpenAI - GPT-4 and code models
 pub struct ChatManager {
     providers: HashMap<ProviderType, BoxedProvider>,
     current_provider: Arc<RwLock<ProviderType>>,
@@ -33,112 +44,117 @@ pub struct ChatManager {
 }
 
 impl ChatManager {
-    /// Create a new chat manager with essential providers only
+    /// Create a new chat manager
     ///
-    /// Initializes: Gemini (Vertex), Claude, OpenAI
-    /// Respects LLM_PROVIDER environment variable for default provider selection
+    /// Initialization order:
+    /// 1. Check LLM_PROVIDER environment variable
+    /// 2. Try Antigravity (OAuth from headless service)
+    /// 3. Try Gemini (API key)
+    /// 4. Try Anthropic (API key)
     pub fn new() -> Self {
         let mut providers: HashMap<ProviderType, BoxedProvider> = HashMap::new();
         let mut default_provider = None;
-        let mut default_model = "gemini-2.5-flash".to_string(); // Auto-updates to latest 2.5 Flash
+        let mut default_model = "gemini-2.5-flash".to_string();
 
-        // Check for LLM_PROVIDER and LLM_MODEL environment variables
+        // Check environment variables
         let env_provider = std::env::var("LLM_PROVIDER").ok();
         let env_model = std::env::var("LLM_MODEL").ok();
 
-        let mut env_provider_type = None;
-        if let Some(provider_name) = &env_provider {
-            if let Ok(provider_type) = provider_name.parse::<ProviderType>() {
-                env_provider_type = Some(provider_type);
-                info!("📋 LLM_PROVIDER environment variable set: {}", provider_name);
-            } else {
-                warn!("⚠️  Invalid LLM_PROVIDER '{}', ignoring", provider_name);
-            }
+        if let Some(ref provider_name) = env_provider {
+            info!("📋 LLM_PROVIDER={}", provider_name);
         }
-
-        if let Some(model_name) = &env_model {
-            info!("📋 LLM_MODEL environment variable set: {}", model_name);
+        if let Some(ref model_name) = env_model {
+            info!("📋 LLM_MODEL={}", model_name);
             default_model = model_name.clone();
         }
 
         // =====================================================
-        // Antigravity - IDE Bridge (PRIMARY - Enterprise Billing)
-        // Code Assist Enterprise - ZERO API charges
+        // Antigravity - OAuth from headless service (PRIMARY)
+        // Uses token captured when user logs into Antigravity via VNC
+        // Enterprise Code Assist - ZERO API charges
         // =====================================================
-        if let Ok(antigravity) = AntigravityProvider::from_env() {
-            info!("✅ Antigravity provider initialized (IDE Bridge)");
-            info!("   🏢 Code Assist Enterprise - ZERO charges");
-            info!("   🔥 Models: claude-3-5-sonnet, gpt-4o");
-            providers.insert(ProviderType::Antigravity, Box::new(antigravity));
-            default_provider = Some(ProviderType::Antigravity);
-            default_model = "claude-3-5-sonnet".to_string();
-        } else {
-            info!("⚠️  Antigravity provider failed to initialize - check GEMINI_API_KEY");
-        }
-
-        // =====================================================
-        // Gemini 3 (Vertex AI) - FALLBACK
-        // Code Assist Enterprise - included in subscription
-        // =====================================================
-        if default_provider.is_none() {
-            if let Ok(gemini) = GeminiClient::from_env() {
-                info!("✅ Gemini 3 provider initialized (Vertex AI)");
-                info!("   🏢 Code Assist Enterprise");
-                info!("   🔥 Model: gemini-2.5-flash (auto-updating)");
-                providers.insert(ProviderType::Gemini, Box::new(gemini));
-                default_provider = Some(ProviderType::Gemini);
-                default_model = "gemini-2.5-flash".to_string();
-            } else {
-                debug!("Gemini provider not available (GEMINI_API_KEY not set)");
+        match AntigravityProvider::from_env() {
+            Ok(antigravity) => {
+                info!("✅ Antigravity provider initialized");
+                info!("   🏢 Uses OAuth token from headless Antigravity service");
+                providers.insert(ProviderType::Antigravity, Box::new(antigravity));
+                if default_provider.is_none() {
+                    default_provider = Some(ProviderType::Antigravity);
+                }
+            }
+            Err(e) => {
+                debug!("Antigravity provider not available: {}", e);
             }
         }
 
         // =====================================================
-        // Claude (Anthropic) - Premium models
+        // Gemini - API key fallback
         // =====================================================
-        if let Ok(anthropic) = AnthropicClient::from_env() {
-            info!("✅ Claude provider initialized (Anthropic)");
-            providers.insert(ProviderType::Anthropic, Box::new(anthropic));
-        } else {
-            debug!("Claude provider not available (ANTHROPIC_API_KEY not set)");
+        if std::env::var("GEMINI_API_KEY").is_ok() {
+            match GeminiClient::from_env() {
+                Ok(gemini) => {
+                    info!("✅ Gemini provider initialized (API key)");
+                    providers.insert(ProviderType::Gemini, Box::new(gemini));
+                    if default_provider.is_none() {
+                        default_provider = Some(ProviderType::Gemini);
+                    }
+                }
+                Err(e) => {
+                    debug!("Gemini provider failed: {}", e);
+                }
+            }
         }
 
-        // TODO: Add OpenAI provider for GPT-4 models
-        // Requires implementing openai.rs module in op-llm crate
-        // Will provide access to GPT-4, GPT-4-turbo, etc.
+        // =====================================================
+        // Anthropic - API key
+        // =====================================================
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            match AnthropicClient::from_env() {
+                Ok(anthropic) => {
+                    info!("✅ Anthropic provider initialized");
+                    providers.insert(ProviderType::Anthropic, Box::new(anthropic));
+                    if default_provider.is_none() {
+                        default_provider = Some(ProviderType::Anthropic);
+                    }
+                }
+                Err(e) => {
+                    debug!("Anthropic provider failed: {}", e);
+                }
+            }
+        }
 
-        // Use environment provider if set and available, otherwise use auto-selected default
-        let default_provider = if let Some(env_pt) = env_provider_type {
-            if providers.contains_key(&env_pt) {
-                info!("✅ Using LLM_PROVIDER environment variable: {:?}", env_pt);
-                env_pt
+        // Use environment provider if specified and available
+        let final_provider = if let Some(ref provider_name) = env_provider {
+            if let Ok(pt) = provider_name.parse::<ProviderType>() {
+                if providers.contains_key(&pt) {
+                    info!("✅ Using LLM_PROVIDER: {:?}", pt);
+                    pt
+                } else {
+                    warn!("⚠️  LLM_PROVIDER '{}' not available", provider_name);
+                    default_provider.unwrap_or(ProviderType::Antigravity)
+                }
             } else {
-                warn!("⚠️  LLM_PROVIDER '{}' not available, falling back to auto-selected", env_provider.unwrap());
-                default_provider.unwrap_or_else(|| {
-                    providers
-                        .keys()
-                        .next()
-                        .cloned()
-                        .unwrap_or(ProviderType::Antigravity)
-                })
+                warn!("⚠️  Invalid LLM_PROVIDER '{}'", provider_name);
+                default_provider.unwrap_or(ProviderType::Antigravity)
             }
         } else {
-            default_provider.unwrap_or_else(|| {
-                providers
-                    .keys()
-                    .next()
-                    .cloned()
-                    .unwrap_or(ProviderType::Antigravity)
-            })
+            default_provider.unwrap_or(ProviderType::Antigravity)
         };
 
-        info!("\n📊 Default provider: {:?}", default_provider);
-        info!("📊 Default model: {}", default_model);
-        info!("📊 Total providers available: {}\n", providers.len());
+        if providers.is_empty() {
+            warn!("⚠️  No LLM providers available!");
+            warn!("   Configure authentication:");
+            warn!("   1. Antigravity headless: sudo systemctl start antigravity-display");
+            warn!("   2. Or set GEMINI_API_KEY environment variable");
+        } else {
+            info!("\n📊 Default provider: {:?}", final_provider);
+            info!("📊 Default model: {}", default_model);
+            info!("📊 Available providers: {}\n", providers.len());
+        }
 
         Self {
             providers,
-            current_provider: Arc::new(RwLock::new(default_provider)),
+            current_provider: Arc::new(RwLock::new(final_provider)),
             current_model: Arc::new(RwLock::new(default_model)),
             model_cache: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -201,7 +217,33 @@ impl ChatManager {
         self.providers.contains_key(provider_type)
     }
 
-    /// Dynamically fetch models from current provider
+    async fn resolve_provider(&self) -> Result<ProviderType> {
+        let current = self.current_provider.read().await.clone();
+        if self.providers.contains_key(&current) {
+            return Ok(current);
+        }
+
+        if let Some(fallback) = self.providers.keys().next().cloned() {
+            warn!(
+                "Provider {:?} not available, falling back to {:?}",
+                current, fallback
+            );
+            *self.current_provider.write().await = fallback.clone();
+            return Ok(fallback);
+        }
+
+        Err(anyhow!(
+            "No LLM providers configured.\n\n\
+            To authenticate:\n\
+            1. Start Antigravity headless: sudo systemctl start antigravity-display antigravity-vnc\n\
+            2. Connect via VNC: vncviewer localhost:5900\n\
+            3. Log in with Google account\n\
+            4. Extract token: ./scripts/antigravity-extract-token.sh\n\n\
+            Or set GEMINI_API_KEY environment variable."
+        ))
+    }
+
+    /// List models from current provider
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let provider_type = self.current_provider.read().await.clone();
 
@@ -209,20 +251,18 @@ impl ChatManager {
         {
             let cache = self.model_cache.read().await;
             if let Some(models) = cache.get(&provider_type) {
-                debug!("Returning cached models for {:?}", provider_type);
                 return Ok(models.clone());
             }
         }
 
-        // Fetch from provider
         let provider = self
             .providers
             .get(&provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Provider not available"))?;
+            .ok_or_else(|| anyhow!("Provider not available"))?;
 
         let models = provider.list_models().await?;
 
-        // Cache the results
+        // Cache
         {
             let mut cache = self.model_cache.write().await;
             cache.insert(provider_type, models.clone());
@@ -233,28 +273,12 @@ impl ChatManager {
 
     /// List models for a specific provider
     pub async fn list_models_for_provider(&self, provider_type: &ProviderType) -> Result<Vec<ModelInfo>> {
-        // Check cache first
-        {
-            let cache = self.model_cache.read().await;
-            if let Some(models) = cache.get(provider_type) {
-                return Ok(models.clone());
-            }
-        }
-
         let provider = self
             .providers
             .get(provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Provider {:?} not available", provider_type))?;
+            .ok_or_else(|| anyhow!("Provider {:?} not available", provider_type))?;
 
-        let models = provider.list_models().await?;
-
-        // Cache the results
-        {
-            let mut cache = self.model_cache.write().await;
-            cache.insert(provider_type.clone(), models.clone());
-        }
-
-        Ok(models)
+        provider.list_models().await
     }
 
     /// Search models
@@ -263,145 +287,57 @@ impl ChatManager {
         let provider = self
             .providers
             .get(&provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Provider not available"))?;
+            .ok_or_else(|| anyhow!("Provider not available"))?;
 
         provider.search_models(query, 20).await
     }
 
-    /// Clear model cache (force refresh)
+    /// Refresh models (clear cache)
     pub async fn refresh_models(&self) -> Result<Vec<ModelInfo>> {
         let provider_type = self.current_provider.read().await.clone();
-
         {
             let mut cache = self.model_cache.write().await;
             cache.remove(&provider_type);
         }
-
         self.list_models().await
+    }
+
+    /// Get model info
+    pub async fn get_model(&self, model_id: &str) -> Result<Option<ModelInfo>> {
+        let provider_type = self.current_provider.read().await.clone();
+        let provider = self
+            .providers
+            .get(&provider_type)
+            .ok_or_else(|| anyhow!("Provider not available"))?;
+
+        provider.get_model(model_id).await
+    }
+
+    /// Check if model is available
+    pub async fn is_model_available(&self, model_id: &str) -> Result<bool> {
+        let provider_type = self.current_provider.read().await.clone();
+        let provider = self
+            .providers
+            .get(&provider_type)
+            .ok_or_else(|| anyhow!("Provider not available"))?;
+
+        provider.is_model_available(model_id).await
     }
 
     /// Send chat message
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
-        let provider_type = self.current_provider.read().await.clone();
+        let provider_type = self.resolve_provider().await?;
         let model = self.current_model.read().await.clone();
 
         let provider = self
             .providers
             .get(&provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Provider not available"))?;
+            .ok_or_else(|| anyhow!("Provider not available"))?;
 
         provider.chat(&model, messages).await
     }
 
-    /// Send chat message with custom credentials (for per-user authentication)
-    pub async fn chat_with_credentials(
-        &self,
-        messages: Vec<ChatMessage>,
-        gemini_key: Option<&str>,
-        anthropic_key: Option<&str>,
-        _openai_key: Option<&str>,
-    ) -> Result<ChatResponse> {
-        let provider_type = self.current_provider.read().await.clone();
-        let model = self.current_model.read().await.clone();
-
-        // Create a temporary provider with user credentials
-        let provider = match provider_type {
-            ProviderType::Gemini => {
-                if let Some(key) = gemini_key {
-                    // Temporarily set the API key for Gemini
-                    let original_key = std::env::var("GEMINI_API_KEY").ok();
-                    std::env::set_var("GEMINI_API_KEY", key);
-
-                    let result = async {
-                        match crate::gemini::GeminiClient::from_env() {
-                            Ok(client) => {
-                                let boxed: BoxedProvider = Box::new(client);
-                                boxed.chat(&model, messages).await
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to create Gemini client: {}", e)),
-                        }
-                    }.await;
-
-                    // Restore original key
-                    if let Some(orig) = original_key {
-                        std::env::set_var("GEMINI_API_KEY", orig);
-                    } else {
-                        std::env::remove_var("GEMINI_API_KEY");
-                    }
-
-                    return result;
-                }
-                // Fall back to regular provider
-                self.providers
-                    .get(&provider_type)
-                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
-            }
-            ProviderType::Anthropic => {
-                if let Some(key) = anthropic_key {
-                    let original_key = std::env::var("ANTHROPIC_API_KEY").ok();
-                    std::env::set_var("ANTHROPIC_API_KEY", key);
-
-                    let result = async {
-                        match crate::anthropic::AnthropicClient::from_env() {
-                            Ok(client) => {
-                                let boxed: BoxedProvider = Box::new(client);
-                                boxed.chat(&model, messages).await
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to create Anthropic client: {}", e)),
-                        }
-                    }.await;
-
-                    if let Some(orig) = original_key {
-                        std::env::set_var("ANTHROPIC_API_KEY", orig);
-                    } else {
-                        std::env::remove_var("ANTHROPIC_API_KEY");
-                    }
-
-                    return result;
-                }
-                self.providers
-                    .get(&provider_type)
-                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
-            }
-            ProviderType::Antigravity => {
-                if let Some(key) = gemini_key {
-                    // Temporarily set the API key for Antigravity (uses Gemini API)
-                    let original_key = std::env::var("GEMINI_API_KEY").ok();
-                    std::env::set_var("GEMINI_API_KEY", key);
-
-                    let result = async {
-                        match AntigravityProvider::from_env() {
-                            Ok(client) => {
-                                let boxed: BoxedProvider = Box::new(client);
-                                boxed.chat(&model, messages).await
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to create Antigravity client: {}", e)),
-                        }
-                    }.await;
-
-                    // Restore original key
-                    if let Some(orig) = original_key {
-                        std::env::set_var("GEMINI_API_KEY", orig);
-                    } else {
-                        std::env::remove_var("GEMINI_API_KEY");
-                    }
-
-                    return result;
-                }
-                // Fall back to regular provider
-                self.providers
-                    .get(&provider_type)
-                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
-            }
-            _ => self.providers
-                .get(&provider_type)
-                .ok_or_else(|| anyhow::anyhow!("Provider not available"))?,
-        };
-
-        provider.chat(&model, messages).await
-    }
-
-    /// Send chat message with specific provider and model
+    /// Send chat with specific provider and model
     pub async fn chat_with(
         &self,
         provider_type: &ProviderType,
@@ -411,12 +347,12 @@ impl ChatManager {
         let provider = self
             .providers
             .get(provider_type)
-            .ok_or_else(|| anyhow::anyhow!("Provider {:?} not available", provider_type))?;
+            .ok_or_else(|| anyhow!("Provider {:?} not available", provider_type))?;
 
         provider.chat(model, messages).await
     }
 
-    /// Get status info for API response
+    /// Get status
     pub async fn get_status(&self) -> serde_json::Value {
         let provider = self.current_provider.read().await.clone();
         let model = self.current_model.read().await.clone();
@@ -433,7 +369,7 @@ impl ChatManager {
         })
     }
 
-    /// Get detailed status with all provider info including pricing
+    /// Get detailed status
     pub async fn get_detailed_status(&self) -> serde_json::Value {
         let current_provider = self.current_provider.read().await.clone();
         let current_model = self.current_model.read().await.clone();
@@ -442,30 +378,22 @@ impl ChatManager {
         
         for ptype in self.providers.keys() {
             let models = self.list_models_for_provider(ptype).await.ok();
-            let (cost_info, features) = match ptype {
-                ProviderType::HuggingFace => (
-                    "~$10 for 20,000 messages (Inference API)",
-                    vec!["236B DeepSeek V2.5", "405B Llama 3.1", "Code models"]
-                ),
-                ProviderType::Anthropic => (
-                    "~$3/1M input, $15/1M output tokens",
-                    vec!["Claude Sonnet 4", "Best reasoning", "Tool use"]
-                ),
+            let (auth_type, features) = match ptype {
                 ProviderType::Antigravity => (
-                    "Enterprise billing (covered by Code Assist)",
-                    vec!["Claude 3.5 Sonnet", "GPT-4o", "Zero API charges"]
+                    "OAuth (headless Antigravity service)",
+                    vec!["Enterprise billing", "Gemini models", "No API charges"]
                 ),
                 ProviderType::Gemini => (
-                    "Free tier available, then pay-per-use",
-                    vec!["Gemini 2.5 Flash", "Multimodal", "Long context"]
+                    "API key (GEMINI_API_KEY)",
+                    vec!["Gemini models", "Multimodal", "Long context"]
                 ),
-                ProviderType::Perplexity => (
-                    "~$5/1000 requests",
-                    vec!["Online search", "Real-time data", "Citations"]
+                ProviderType::Anthropic => (
+                    "API key (ANTHROPIC_API_KEY)",
+                    vec!["Claude models", "Best reasoning", "Tool use"]
                 ),
-                ProviderType::OpenAI => (
-                    "Pay-per-token",
-                    vec!["GPT-4o", "O1", "GPT-4 Turbo"]
+                _ => (
+                    "API key",
+                    vec![]
                 ),
             };
             
@@ -474,7 +402,7 @@ impl ChatManager {
                 serde_json::json!({
                     "available": true,
                     "model_count": models.as_ref().map(|m| m.len()).unwrap_or(0),
-                    "cost_info": cost_info,
+                    "auth_type": auth_type,
                     "features": features,
                 })
             );
@@ -484,7 +412,6 @@ impl ChatManager {
             "current_provider": current_provider.to_string(),
             "current_model": current_model,
             "providers": provider_status,
-            "recommendation": "HuggingFace with DeepSeek V2.5 (236B) for best value"
         })
     }
 }
@@ -513,21 +440,19 @@ impl LlmProvider for ChatManager {
     }
 
     async fn chat(&self, model: &str, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
-        let provider_type = self.current_provider.read().await.clone();
-        let provider = self
-            .providers
-            .get(&provider_type)
-            .ok_or_else(|| anyhow!("Provider {:?} not available", provider_type))?;
+        let provider_type = self.resolve_provider().await?;
+        let provider = self.providers.get(&provider_type).ok_or_else(|| {
+            anyhow!("Provider {:?} not available", provider_type)
+        })?;
 
         provider.chat(model, messages).await
     }
 
     async fn chat_with_request(&self, model: &str, request: ChatRequest) -> Result<ChatResponse> {
-        let provider_type = self.current_provider.read().await.clone();
-        let provider = self
-            .providers
-            .get(&provider_type)
-            .ok_or_else(|| anyhow!("Provider {:?} not available", provider_type))?;
+        let provider_type = self.resolve_provider().await?;
+        let provider = self.providers.get(&provider_type).ok_or_else(|| {
+            anyhow!("Provider {:?} not available", provider_type)
+        })?;
 
         provider.chat_with_request(model, request).await
     }
@@ -537,11 +462,10 @@ impl LlmProvider for ChatManager {
         model: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<String>>> {
-        let provider_type = self.current_provider.read().await.clone();
-        let provider = self
-            .providers
-            .get(&provider_type)
-            .ok_or_else(|| anyhow!("Provider {:?} not available", provider_type))?;
+        let provider_type = self.resolve_provider().await?;
+        let provider = self.providers.get(&provider_type).ok_or_else(|| {
+            anyhow!("Provider {:?} not available", provider_type)
+        })?;
 
         provider.chat_stream(model, messages).await
     }

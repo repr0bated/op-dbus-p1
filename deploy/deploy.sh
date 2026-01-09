@@ -6,10 +6,15 @@
 
 set -e
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Change to project root (parent of deploy/)
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
 # Configuration
 INSTALL_DIR="/usr/local/sbin"
 SYSTEMD_DIR="/etc/systemd/system"
-PROJECT_ROOT=$(pwd)
 
 # Colors
 GREEN='\033[0;32m'
@@ -58,14 +63,30 @@ deploy_component() {
     # 2. Stop service
     log_info "Stopping $service..."
     sudo systemctl stop "$service" || true
+    sleep 1  # Give systemd time to release the file
     
     # 3. Install binary
     local bin_path="target/release/$binary"
     if [[ -f "$bin_path" ]]; then
         log_info "Installing $binary to $INSTALL_DIR..."
-        sudo cp "$bin_path" "$INSTALL_DIR/$binary"
-        sudo chown root:root "$INSTALL_DIR/$binary"
-        sudo chmod 755 "$INSTALL_DIR/$binary"
+        # Try to copy with retries in case file is busy
+        local retries=5
+        while [[ $retries -gt 0 ]]; do
+            if sudo cp -f "$bin_path" "$INSTALL_DIR/$binary" 2>/dev/null; then
+                sudo chown root:root "$INSTALL_DIR/$binary"
+                sudo chmod 755 "$INSTALL_DIR/$binary"
+                break
+            fi
+            retries=$((retries - 1))
+            if [[ $retries -gt 0 ]]; then
+                sleep 0.5
+            fi
+        done
+        
+        if [[ $retries -eq 0 ]]; then
+            log_error "Failed to install $binary - file may be in use"
+            return 1
+        fi
     else
         log_error "Binary not found at $bin_path"
         return 1
@@ -216,66 +237,14 @@ deploy_mcp_configs() {
 # --- Detection Logic ---
 
 detect_changes() {
-    log_info "🔍 Detecting changed components..."
+    log_info "🔍 Deploying all components (git detection disabled)..."
     
-    # Get list of changed files (staged and unstaged)
-    local changed_files
-    changed_files=$(git diff --name-only HEAD)
-    
-    if [[ -z "$changed_files" ]]; then
-        log_warn "No changes detected in git tracked files."
-        read -p "Force deploy all? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            # Still check for new services even if no code changed
-            install_new_services
-            exit 0
-        fi
-        BUILD_WEB=true; BUILD_LOGS=true; BUILD_MCP=true; BUILD_AGENTS=true; BUILD_DBUS=true
-        return
-    fi
-
-    echo "$changed_files" | while read -r file; do
-        if [[ -z "$file" ]]; then continue; fi
-        
-        # 1. Shared Libraries (Trigger multiple builds)
-        if [[ $file == crates/op-core* ]]; then
-            log_warn "Change in op-core detected. Rebuilding ALL."
-            echo "ALL"
-            return
-        elif [[ $file == crates/op-tools* ]]; then
-            echo "WEB"; echo "MCP"; echo "DBUS"; echo "AGENTS"
-        elif [[ $file == crates/op-chat* || $file == crates/op-llm* || $file == crates/op-state* ]]; then
-            echo "WEB"; echo "DBUS"; echo "MCP"
-        
-        # 2. Specific Components
-        elif [[ $file == crates/op-web* || $file == deploy/systemd/op-web.service ]]; then
-            echo "WEB"
-        elif [[ $file == streaming-logs* || $file == deploy/systemd/streaming-logs.service ]]; then
-            echo "LOGS"
-        elif [[ $file == crates/op-mcp* || $file == deploy/systemd/op-mcp.service ]]; then
-            echo "MCP"
-        elif [[ $file == crates/op-agents* || $file == deploy/systemd/op-agents.service ]]; then
-            echo "AGENTS"
-        elif [[ $file == op-dbus-service* || $file == deploy/systemd/op-dbus-service.service ]]; then
-            echo "DBUS"
-        fi
-    done | sort | uniq > /tmp/op_deploy_targets
-    
-    # Read targets from temp file
-    if [[ -f /tmp/op_deploy_targets ]]; then
-        while read -r target; do
-            case $target in
-                "ALL") BUILD_WEB=true; BUILD_LOGS=true; BUILD_MCP=true; BUILD_AGENTS=true; BUILD_DBUS=true ;; 
-                "WEB") BUILD_WEB=true ;; 
-                "LOGS") BUILD_LOGS=true ;; 
-                "MCP") BUILD_MCP=true ;; 
-                "AGENTS") BUILD_AGENTS=true ;; 
-                "DBUS") BUILD_DBUS=true ;; 
-            esac
-        done < /tmp/op_deploy_targets
-        rm /tmp/op_deploy_targets
-    fi
+    # Skip git detection and deploy all components
+    BUILD_WEB=true
+    BUILD_LOGS=true
+    BUILD_MCP=true
+    BUILD_AGENTS=true
+    BUILD_DBUS=true
 }
 
 # --- Main Execution ---

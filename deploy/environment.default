@@ -18,7 +18,7 @@
 # When set, the chatbot gains tools to read, modify, commit, and deploy its own code.
 # The chatbot understands this repository IS itself - changes here affect its capabilities.
 
-OP_SELF_REPO_PATH=/home/jeremy/git/op-dbus-v2
+# OP_SELF_REPO_PATH=/path/to/your/op-dbus-repo
 
 # =============================================================================
 # LLM PROVIDER API KEYS

@@ -1,6 +1,7 @@
 //! API routes and route handlers
 
 use axum::{
+    response::Html,
     routing::{get, post},
     Router,
 };
@@ -23,7 +24,13 @@ use crate::websocket;
 pub mod chat;
 #[allow(dead_code)]
 pub mod llm;
+pub mod admin;
 
+const FALLBACK_INDEX_HTML: &str = include_str!("../../static/fallback-chat.html");
+
+async fn index_handler() -> Html<&'static str> {
+    Html(FALLBACK_INDEX_HTML)
+}
 
 /// Create the complete router with all routes
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -97,12 +104,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(mcp_route)
         .merge(agents_mcp_route)
         .merge(ws_route)
-        .nest("/groups-admin", groups_admin::create_groups_admin_router(state.clone()));
+        .nest("/groups-admin", groups_admin::create_groups_admin_router(state.clone()))
+        .nest("/admin", admin::admin_routes(state.clone()));
+
+    let mut needs_index_fallback = true;
 
     // Serve static files (WASM frontend) from an explicit path if configured.
     if let Ok(dir) = std::env::var("OP_WEB_STATIC_DIR") {
         if std::path::Path::new(&dir).exists() {
             tracing::info!("Serving static files from OP_WEB_STATIC_DIR: {}", dir);
+            let index_path = std::path::Path::new(&dir).join("index.html");
+            needs_index_fallback = !index_path.exists();
             router = router.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
         } else {
             tracing::warn!("OP_WEB_STATIC_DIR does not exist: {}", dir);
@@ -113,10 +125,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         for dir in static_dirs {
             if std::path::Path::new(dir).exists() {
                 tracing::info!("Serving static files from: {}", dir);
+                let index_path = std::path::Path::new(dir).join("index.html");
+                needs_index_fallback = !index_path.exists();
                 router = router.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true));
                 break;
             }
         }
+    }
+
+    if needs_index_fallback {
+        tracing::warn!("Static index.html not found. Serving embedded chat UI for /.");
+        router = router.route("/", get(index_handler));
     }
 
     router

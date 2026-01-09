@@ -26,84 +26,56 @@ pub struct LlmProvidersResponse {
 }
 
 /// GET /api/llm/status - Get LLM status
+/// TEMPORARILY DISABLED: Providers are disabled
 pub async fn llm_status_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<LlmStatusResponse> {
-    let provider = state.chat_manager.current_provider().await;
-    let model = state.chat_manager.current_model().await;
+    // TEMPORARILY DISABLED: Return disabled status
     Json(LlmStatusResponse {
-        provider: provider.to_string(),
-        model,
-        available: true,
+        provider: "disabled".to_string(),
+        model: "disabled".to_string(),
+        available: false,
     })
 }
 
 /// GET /api/llm/providers - List available providers
+/// TEMPORARILY DISABLED: No providers available
 pub async fn list_providers_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<LlmProvidersResponse> {
-    let current = state.chat_manager.current_provider().await;
-    let providers = state
-        .chat_manager
-        .available_providers()
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
-
+    // TEMPORARILY DISABLED: Return empty provider list
     Json(LlmProvidersResponse {
-        providers,
-        current: current.to_string(),
+        providers: vec![],
+        current: "disabled".to_string(),
     })
 }
 
 /// GET /api/llm/models - List available models
+/// TEMPORARILY DISABLED: No models available
 pub async fn list_models_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<Value> {
-    match state.chat_manager.list_models().await {
-        Ok(models) => Json(json!({
-            "models": models,
-            "current": state.chat_manager.current_model().await
-        })),
-        Err(e) => Json(json!({
-            "error": e.to_string()
-        })),
-    }
+    // TEMPORARILY DISABLED: Return empty models list
+    Json(json!({
+        "models": [],
+        "current": "disabled",
+        "status": "LLM providers are temporarily disabled"
+    }))
 }
 
 /// GET /api/llm/models/:provider - List models for a provider
+/// TEMPORARILY DISABLED: No models available for any provider
 pub async fn list_models_for_provider_handler(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
 ) -> Json<Value> {
-    let provider_type = match ProviderType::from_str(&provider) {
-        Ok(provider) => provider,
-        Err(e) => {
-            return Json(json!({
-                "error": e
-            }));
-        }
-    };
-
-    match state.chat_manager.list_models_for_provider(&provider_type).await {
-        Ok(models) => {
-            let current_provider = state.chat_manager.current_provider().await;
-            let current_model = if current_provider == provider_type {
-                Some(state.chat_manager.current_model().await)
-            } else {
-                None
-            };
-
-            Json(json!({
-                "provider": provider,
-                "models": models,
-                "current": current_model
-            }))
-        }
-        Err(e) => Json(json!({
-            "error": e.to_string()
-        })),
-    }
+    // TEMPORARILY DISABLED: Return empty models list for all providers
+    Json(json!({
+        "provider": provider,
+        "models": [],
+        "current": null,
+        "status": "LLM providers are temporarily disabled"
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,28 +84,17 @@ pub struct SwitchModelRequest {
 }
 
 /// POST /api/llm/model - Switch model
+/// TEMPORARILY DISABLED: Model switching not allowed
 pub async fn switch_model_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SwitchModelRequest>,
 ) -> Json<Value> {
-    match state.chat_manager.switch_model(request.model.clone()).await {
-        Ok(()) => {
-            let mut note = None;
-            if let Err(e) = persist_model(&request.model).await {
-                note = Some(format!("Model switched but persistence failed: {}", e));
-            }
-            Json(json!({
-                "success": true,
-                "model": request.model,
-                "note": note
-            }))
-        }
-        Err(e) => Json(json!({
-            "success": false,
-            "model": request.model,
-            "note": e.to_string()
-        })),
-    }
+    // TEMPORARILY DISABLED: Reject all model switches
+    Json(json!({
+        "success": false,
+        "model": request.model,
+        "note": "LLM providers are temporarily disabled"
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,39 +103,17 @@ pub struct SwitchProviderRequest {
 }
 
 /// POST /api/llm/provider - Switch provider
+/// TEMPORARILY DISABLED: Provider switching not allowed
 pub async fn switch_provider_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SwitchProviderRequest>,
 ) -> Json<Value> {
-    let provider = match ProviderType::from_str(&request.provider) {
-        Ok(provider) => provider,
-        Err(e) => {
-            return Json(json!({
-                "success": false,
-                "provider": request.provider,
-                "note": e
-            }));
-        }
-    };
-
-    match state.chat_manager.switch_provider(provider).await {
-        Ok(()) => {
-            let mut note = None;
-            if let Err(e) = persist_provider(&request.provider).await {
-                note = Some(format!("Provider switched but persistence failed: {}", e));
-            }
-            Json(json!({
-                "success": true,
-                "provider": request.provider,
-                "note": note
-            }))
-        }
-        Err(e) => Json(json!({
-            "success": false,
-            "provider": request.provider,
-            "note": e.to_string()
-        })),
-    }
+    // TEMPORARILY DISABLED: Reject all provider switches
+    Json(json!({
+        "success": false,
+        "provider": request.provider,
+        "note": "LLM providers are temporarily disabled"
+    }))
 }
 
 const PERSISTED_MODEL_PATH: &str = "/etc/op-dbus/llm-model";

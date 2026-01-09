@@ -8,6 +8,27 @@ use op_core::security::AccessZone;
 use std::net::SocketAddr;
 use tracing::debug;
 
+fn extract_auth_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(raw) = headers.get("x-op-mcp-token").and_then(|v| v.to_str().ok()) {
+        let token = raw.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    if let Some(raw) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        let trimmed = raw.trim();
+        if let Some(bearer) = trimmed.strip_prefix("Bearer ") {
+            let token = bearer.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Extract IP from headers or connection info
 pub fn extract_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
     // 1. Check X-Forwarded-For (standard proxy header)
@@ -35,6 +56,7 @@ pub fn extract_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
 }
 
 /// Middleware to identify Client IP and attach AccessZone to the request
+/// TEMPORARILY DISABLED: All requests get TrustedMesh access (no auth required)
 pub async fn ip_security_middleware(
     // We try to extract ConnectInfo if available (requires Router to be constructed with it)
     // If running behind Nginx, this might not be strictly necessary if headers are present,
@@ -46,11 +68,12 @@ pub async fn ip_security_middleware(
 ) -> Response {
     let headers = request.headers();
     let addr = connect_info.map(|ci| ci.0);
-    
-    let client_ip = extract_ip(headers, addr.as_ref());
-    let zone = AccessZone::from_ip(&client_ip);
 
-    debug!("Request from IP: {} [Zone: {:?}]", client_ip, zone);
+    let client_ip = extract_ip(headers, addr.as_ref());
+    // TEMPORARILY DISABLED: Grant TrustedMesh access to all requests
+    let zone = AccessZone::TrustedMesh;
+
+    debug!("Request from IP: {} [Zone: {:?}] (AUTH DISABLED)", client_ip, zone);
 
     // Attach AccessZone to the request extensions
     // This allows downstream handlers (like MCP tools) to retrieve it via:

@@ -1,0 +1,63 @@
+# Build artifacts
+target/
+dist/
+build/
+
+# Dependencies  
+node_modules/
+vendor/
+
+# Lock files (huge, useless for context)
+package-lock.json
+Cargo.lock
+yarn.lock
+pnpm-lock.yaml
+
+# Git
+.git/
+
+# Aye internal
+.aye/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Binary files
+*.wasm
+*.so
+*.dylib
+*.dll
+*.exe
+*.o
+*.a
+*.rlib
+*.rmeta
+*.d
+
+# Logs
+*.log
+logs/
+
+# Test/cache
+coverage/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Generated
+*.pb.rs
+
+# Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/

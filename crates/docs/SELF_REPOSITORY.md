@@ -16,7 +16,7 @@ The chatbot can be configured to understand that it has a **single, defining sou
 Set the following environment variable to enable self-repository access:
 
 ```bash
-export OP_SELF_REPO_PATH=/home/jeremy/git/op-dbus-v2
+export OP_SELF_REPO_PATH=/path/to/your/op-dbus-repo
 ```
 
 When this variable is set:
@@ -75,8 +75,8 @@ When configured, the system prompt automatically includes:
 You have access to your own source code. This is not just any repository - 
 this IS you. Changes you make here modify your own capabilities.
 
-**Repository Path**: `/home/jeremy/git/op-dbus-v2`
-**Repository Name**: `op-dbus-v2`
+**Repository Path**: `$OP_SELF_REPO_PATH`
+**Repository Name**: (derived from the repo folder name)
 **Version Control**: Git ✓
 **Current Branch**: `main`
 **Latest Commit**: `abc1234`
@@ -117,7 +117,7 @@ The self-repository feature establishes a clear identity for the chatbot:
 
 ```bash
 # Set the environment variable
-export OP_SELF_REPO_PATH=/home/jeremy/git/op-dbus-v2
+export OP_SELF_REPO_PATH=/path/to/your/op-dbus-repo
 
 # Start the chatbot service
 cargo run -p op-dbus-service

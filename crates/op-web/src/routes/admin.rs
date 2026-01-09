@@ -19,7 +19,7 @@ use tracing::{info, error};
 use crate::AppState;
 
 /// Create admin routes
-pub fn admin_routes() -> Router<Arc<AppState>> {
+pub fn admin_routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/prompt", get(get_system_prompt))
         .route("/prompt/custom", get(get_custom_prompt))
@@ -27,6 +27,7 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/prompt/test", post(test_prompt))
         .route("/prompt/reload", post(reload_prompt))
         .route("/config", get(get_config))
+        .with_state(state)
 }
 
 // =============================================================================
@@ -247,11 +248,12 @@ async fn get_config(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let llm_model = state.chat_manager.current_model().await;
+    let llm_provider = state.chat_manager.current_provider().await.to_string();
     let tool_count = state.tool_registry.list().await.len();
     
     Json(AdminConfigResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        llm_provider: state.chat_manager.provider_name().await,
+        llm_provider,
         llm_model,
         self_repo_configured: std::env::var("OP_SELF_REPO_PATH").is_ok(),
         self_repo_path: std::env::var("OP_SELF_REPO_PATH").ok(),

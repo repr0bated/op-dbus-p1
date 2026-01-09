@@ -1,558 +1,236 @@
-//! Antigravity Provider - Agentic AI Without Vertex
+//! Antigravity Provider - Uses OAuth token from headless Antigravity service
 //!
-//! Uses:
-//! - Google OAuth for user identity (optional)
-//! - Standard Gemini API (NOT Vertex AI) for LLM
-//! - Your existing MCP agents for agentic capabilities
+//! ## Authentication Flow
 //!
-//! NO VERTEX AI. NO GCP BILLING.
+//! 1. Antigravity IDE runs headless with virtual Wayland display
+//! 2. User logs in once via VNC
+//! 3. OAuth token is extracted and saved
+//! 4. This provider uses that token for Gemini API calls
+//!
+//! ## Features
+//!
+//! - Uses enterprise Code Assist subscription (no API charges)
+//! - Auto-refreshes expired tokens
+//! - Falls back to API key if OAuth token not available
+//!
+//! ## Configuration
+//!
+//! ```bash
+//! # OAuth token (from Antigravity headless service)
+//! export GOOGLE_AUTH_TOKEN_FILE=~/.config/antigravity/token.json
+//!
+//! # Or fallback to API key
+//! export GEMINI_API_KEY=xxx
+//! ```
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
+use crate::headless_oauth::HeadlessOAuthProvider;
 use crate::provider::{
-    ChatMessage, ChatRequest, ChatResponse, LlmProvider, ModelInfo,
-    ProviderType, TokenUsage,
-    ToolCallInfo, ToolChoice, ToolDefinition,
+    ChatMessage, ChatRequest, ChatResponse, LlmProvider, ModelInfo, 
+    ProviderType, TokenUsage, ToolCallInfo, ToolChoice, ToolDefinition,
 };
 
-// =============================================================================
-// STANDARD GEMINI API (NOT VERTEX)
-// =============================================================================
-
-pub const DEFAULT_BRIDGE_URL: &str = "http://127.0.0.1:3333";
-
+/// Gemini API base URL
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
-// =============================================================================
-// CONFIGURATION
-// =============================================================================
+/// Available models through Antigravity/Gemini
+const ANTIGRAVITY_MODELS: &[(&str, &str, &str)] = &[
+    ("gemini-2.5-flash", "Gemini 2.5 Flash", "Fast, efficient model (auto-updating)"),
+    ("gemini-2.0-flash", "Gemini 2.0 Flash", "Previous generation flash model"),
+    ("gemini-2.0-flash-thinking-exp-01-21", "Gemini Flash Thinking", "Enhanced reasoning"),
+    ("gemini-1.5-pro", "Gemini 1.5 Pro", "High quality, long context"),
+    ("gemini-1.5-flash", "Gemini 1.5 Flash", "Fast 1.5 generation"),
+];
 
-/// Antigravity configuration
+/// Authentication method
 #[derive(Debug, Clone)]
-pub struct AntigravityConfig {
-    /// Gemini API key (from aistudio.google.com) - optional when using bridge
-    pub api_key: Option<String>,
-    /// OpenAI-compatible bridge URL (enterprise auth)
-    pub bridge_url: Option<String>,
-    /// Default model
-    pub default_model: String,
-    /// Enable auto model selection
-    pub auto_routing: bool,
-    /// MCP server URL for agents
-    pub mcp_server_url: Option<String>,
-    /// Enable agentic mode
-    pub agentic_mode: bool,
-    /// User info from Google OAuth (optional)
-    pub user: Option<GoogleUser>,
+enum AuthMethod {
+    /// OAuth token from headless Antigravity service
+    OAuth(Arc<HeadlessOAuthProvider>),
+    /// Direct API key
+    ApiKey(String),
 }
 
-impl AntigravityConfig {
-    pub fn from_env() -> Result<Self> {
-        let bridge_url = std::env::var("ANTIGRAVITY_BRIDGE_URL").ok();
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            .ok();
-
-        if bridge_url.is_none() && api_key.is_none() {
-            return Err(anyhow::anyhow!(
-                "No Antigravity bridge or Gemini API key found. Set ANTIGRAVITY_BRIDGE_URL or GEMINI_API_KEY."
-            ));
-        }
-
-        Ok(Self {
-            api_key,
-            bridge_url,
-            default_model: std::env::var("ANTIGRAVITY_MODEL")
-                .unwrap_or_else(|_| "gemini-2.0-flash".to_string()),
-            auto_routing: std::env::var("ANTIGRAVITY_AUTO_ROUTING")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(true),
-            mcp_server_url: std::env::var("MCP_SERVER_URL").ok()
-                .or_else(|| Some("http://localhost:8080/mcp/agents".to_string())),
-            agentic_mode: std::env::var("ANTIGRAVITY_AGENTIC")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(true),
-            user: None,
-        })
-    }
-}
-
-/// Google user info from OAuth
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoogleUser {
-    pub id: String,
-    pub email: String,
-    pub name: String,
-    pub picture: Option<String>,
-}
-
-// =============================================================================
-// GEMINI API TYPES (Standard API, not Vertex)
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-struct GeminiRequest {
-    contents: Vec<GeminiContent>,
-    #[serde(rename = "systemInstruction", skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<GeminiContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<GeminiTool>>,
-    #[serde(rename = "toolConfig", skip_serializing_if = "Option::is_none")]
-    tool_config: Option<GeminiToolConfig>,
-    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GeminiGenerationConfig>,
-}
-
-// =============================================================================
-// OPENAI BRIDGE TYPES (Antigravity)
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-struct OpenAIRequest {
-    model: String,
-    messages: Vec<OpenAIMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct OpenAIMessage {
-    role: String,
-    #[serde(default)]
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct OpenAIToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    call_type: String,
-    function: OpenAIFunction,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct OpenAIFunction {
-    name: String,
-    arguments: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAIResponse {
-    id: String,
-    model: Option<String>,
-    choices: Vec<OpenAIChoice>,
-    usage: Option<OpenAIUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAIChoice {
-    message: OpenAIMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAIUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GeminiContent {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-enum GeminiPart {
-    Text { text: String },
-    FunctionCall {
-        #[serde(rename = "functionCall")]
-        function_call: GeminiFunctionCall,
-    },
-    FunctionResponse {
-        #[serde(rename = "functionResponse")]
-        function_response: GeminiFunctionResponse,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GeminiFunctionCall {
-    name: String,
-    args: Value,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct GeminiFunctionResponse {
-    name: String,
-    response: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiTool {
-    #[serde(rename = "functionDeclarations")]
-    function_declarations: Vec<GeminiFunctionDeclaration>,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiFunctionDeclaration {
-    name: String,
-    description: String,
-    parameters: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiToolConfig {
-    #[serde(rename = "functionCallingConfig")]
-    function_calling_config: FunctionCallingConfig,
-}
-
-#[derive(Debug, Serialize)]
-struct FunctionCallingConfig {
-    mode: String, // "AUTO", "ANY", "NONE"
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiGenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiResponse {
-    candidates: Option<Vec<GeminiCandidate>>,
-    #[serde(rename = "usageMetadata")]
-    usage_metadata: Option<GeminiUsageMetadata>,
-    error: Option<GeminiError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiCandidate {
-    content: GeminiContent,
-    #[serde(rename = "finishReason")]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiUsageMetadata {
-    #[serde(rename = "promptTokenCount")]
-    prompt_token_count: Option<u32>,
-    #[serde(rename = "candidatesTokenCount")]
-    candidates_token_count: Option<u32>,
-    #[serde(rename = "totalTokenCount")]
-    total_token_count: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiError {
-    code: i32,
-    message: String,
-}
-
-// =============================================================================
-// ANTIGRAVITY PROVIDER
-// =============================================================================
-
-/// Antigravity LLM Provider
+/// Antigravity Provider
 ///
-/// Agentic AI using standard Gemini API (NOT Vertex AI)
+/// Uses OAuth token captured from Antigravity headless service,
+/// or falls back to API key.
 pub struct AntigravityProvider {
-    config: AntigravityConfig,
     client: Client,
-    mcp_tools: RwLock<Vec<ToolDefinition>>,
+    auth: AuthMethod,
+    default_model: String,
 }
 
 impl AntigravityProvider {
     /// Create from environment
+    ///
+    /// Tries in order:
+    /// 1. OAuth token from `GOOGLE_AUTH_TOKEN_FILE`
+    /// 2. API key from `GEMINI_API_KEY`
     pub fn from_env() -> Result<Self> {
-        let config = AntigravityConfig::from_env()?;
-        Self::new(config)
-    }
-
-    /// Create with config
-    pub fn new(config: AntigravityConfig) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
-            .build()?;
+            .build()
+            .context("Failed to create HTTP client")?;
 
-        info!("Antigravity provider initialized");
-        info!("  Mode: Standard Gemini API (NOT Vertex AI)");
-        info!("  Model: {}", config.default_model);
-        info!("  Agentic: {}", config.agentic_mode);
-        info!("  MCP: {:?}", config.mcp_server_url);
+        // Try OAuth first
+        let oauth_provider = HeadlessOAuthProvider::from_env().ok();
+        
+        let auth = if let Some(ref oauth) = oauth_provider {
+            if oauth.is_authenticated() {
+                info!("✅ Antigravity: Using OAuth token from {}", oauth.token_file().display());
+                AuthMethod::OAuth(Arc::new(oauth_provider.unwrap()))
+            } else {
+                // Try API key
+                if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
+                    info!("✅ Antigravity: Using API key (OAuth token not valid)");
+                    AuthMethod::ApiKey(api_key)
+                } else {
+                    anyhow::bail!(
+                        "No valid authentication found.\n\n\
+                        Options:\n\
+                        1. Start Antigravity headless and login via VNC:\n\
+                           sudo systemctl start antigravity-display antigravity-vnc\n\
+                           vncviewer localhost:5900\n\
+                           ./scripts/antigravity-extract-token.sh\n\n\
+                        2. Set GEMINI_API_KEY environment variable"
+                    );
+                }
+            }
+        } else if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
+            info!("✅ Antigravity: Using API key");
+            AuthMethod::ApiKey(api_key)
+        } else {
+            anyhow::bail!(
+                "No authentication configured.\n\n\
+                Set GEMINI_API_KEY or configure OAuth via Antigravity headless service."
+            );
+        };
+
+        let default_model = std::env::var("LLM_MODEL")
+            .unwrap_or_else(|_| "gemini-2.5-flash".to_string());
 
         Ok(Self {
-            config,
             client,
-            mcp_tools: RwLock::new(Vec::new()),
+            auth,
+            default_model,
         })
     }
 
-    /// Set user from OAuth login
-    pub fn set_user(&mut self, user: GoogleUser) {
-        info!("User authenticated: {} ({})", user.name, user.email);
-        self.config.user = Some(user);
+    /// Create with API key directly
+    pub fn with_api_key(api_key: impl Into<String>) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
+            auth: AuthMethod::ApiKey(api_key.into()),
+            default_model: "gemini-2.5-flash".to_string(),
+        }
     }
 
-    /// Get current user
-    pub fn user(&self) -> Option<&GoogleUser> {
-        self.config.user.as_ref()
+    /// Create with OAuth provider
+    pub fn with_oauth(oauth: HeadlessOAuthProvider) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
+            auth: AuthMethod::OAuth(Arc::new(oauth)),
+            default_model: "gemini-2.5-flash".to_string(),
+        }
     }
 
-    /// Load tools from MCP server
-    pub async fn load_mcp_tools(&self) -> Result<Vec<ToolDefinition>> {
-        let url = match &self.config.mcp_server_url {
-            Some(url) => url,
-            None => return Ok(Vec::new()),
-        };
-
-        debug!("Loading MCP tools from {}", url);
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {}
-        });
-
-        let message_url = if url.ends_with("/sse") {
-            url.replace("/sse", "/message")
-        } else {
-            format!("{}/message", url.trim_end_matches('/'))
-        };
-
-        let response = match self.client
-            .post(&message_url)
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Failed to connect to MCP server: {}", e);
-                return Ok(Vec::new());
+    /// Build authenticated request
+    async fn build_request(&self, url: &str) -> Result<reqwest::RequestBuilder> {
+        match &self.auth {
+            AuthMethod::OAuth(oauth) => {
+                let token = oauth.get_token().await?;
+                Ok(self.client
+                    .post(url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Content-Type", "application/json"))
             }
-        };
-
-        if !response.status().is_success() {
-            warn!("MCP server error: {}", response.status());
-            return Ok(Vec::new());
-        }
-
-        let result: Value = response.json().await?;
-        let tools: Vec<ToolDefinition> = result
-            .get("result")
-            .and_then(|r| r.get("tools"))
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        Some(ToolDefinition {
-                            name: t.get("name")?.as_str()?.to_string(),
-                            description: t.get("description")?.as_str()?.to_string(),
-                            parameters: t.get("inputSchema").cloned().unwrap_or(json!({})),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        info!("Loaded {} MCP tools", tools.len());
-        *self.mcp_tools.write().await = tools.clone();
-
-        Ok(tools)
-    }
-
-    /// Execute MCP tool
-    pub async fn execute_mcp_tool(&self, name: &str, arguments: Value) -> Result<Value> {
-        let url = self.config.mcp_server_url.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("MCP server not configured"))?;
-
-        let message_url = if url.ends_with("/sse") {
-            url.replace("/sse", "/message")
-        } else {
-            format!("{}/message", url.trim_end_matches('/'))
-        };
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments
+            AuthMethod::ApiKey(key) => {
+                // API key goes in URL for Gemini
+                let url_with_key = if url.contains('?') {
+                    format!("{}&key={}", url, key)
+                } else {
+                    format!("{}?key={}", url, key)
+                };
+                Ok(self.client
+                    .post(&url_with_key)
+                    .header("Content-Type", "application/json"))
             }
-        });
-
-        let response = self.client
-            .post(&message_url)
-            .json(&request)
-            .send()
-            .await?;
-
-        let result: Value = response.json().await?;
-
-        if let Some(error) = result.get("error") {
-            anyhow::bail!("MCP error: {}", error);
         }
-
-        Ok(result.get("result").cloned().unwrap_or(json!({})))
-    }
-
-    /// Auto-select model based on task
-    fn select_model(&self, messages: &[ChatMessage], has_tools: bool) -> String {
-        if !self.config.auto_routing {
-            return self.config.default_model.clone();
-        }
-
-        let total_length: usize = messages.iter().map(|m| m.content.len()).sum();
-        let has_code = messages.iter().any(|m| {
-            m.content.contains("```") ||
-            m.content.contains("fn ") ||
-            m.content.contains("def ") ||
-            m.content.contains("class ")
-        });
-        let needs_reasoning = messages.iter().any(|m| {
-            let lower = m.content.to_lowercase();
-            lower.contains("think") ||
-            lower.contains("reason") ||
-            lower.contains("step by step") ||
-            lower.contains("analyze")
-        });
-
-        let model = if has_tools {
-            "gemini-2.0-flash"  // Best for tool use
-        } else if needs_reasoning {
-            "gemini-2.0-flash-thinking-exp-01-21"  // Reasoning
-        } else if has_code && total_length > 5000 {
-            "gemini-1.5-pro"  // Long code context
-        } else {
-            "gemini-2.0-flash"  // Fast default
-        };
-
-        debug!("Auto-selected: {} (code={}, reasoning={}, len={})",
-            model, has_code, needs_reasoning, total_length);
-
-        model.to_string()
     }
 
     /// Convert messages to Gemini format
-    fn convert_messages(&self, messages: &[ChatMessage]) -> (Vec<GeminiContent>, Option<GeminiContent>) {
+    fn convert_messages(&self, messages: &[ChatMessage]) -> (Vec<Value>, Option<Value>) {
         let mut system_instruction = None;
         let mut contents = Vec::new();
 
         for msg in messages {
             if msg.role == "system" {
-                system_instruction = Some(GeminiContent {
-                    role: None,
-                    parts: vec![GeminiPart::Text { text: msg.content.clone() }],
-                });
+                system_instruction = Some(json!({
+                    "parts": [{"text": msg.content}]
+                }));
                 continue;
             }
 
             let role = match msg.role.as_str() {
                 "assistant" => "model",
-                "tool" => "user",
                 _ => "user",
             };
 
-            // Handle tool calls
-            if let Some(ref tool_calls) = msg.tool_calls {
-                let parts: Vec<GeminiPart> = tool_calls.iter().map(|tc| {
-                    GeminiPart::FunctionCall {
-                        function_call: GeminiFunctionCall {
-                            name: tc.name.clone(),
-                            args: tc.arguments.clone(),
-                        }
-                    }
-                }).collect();
-                contents.push(GeminiContent {
-                    role: Some(role.to_string()),
-                    parts,
-                });
-            }
-            // Handle tool results
-            else if msg.role == "tool" {
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    contents.push(GeminiContent {
-                        role: Some("user".to_string()),
-                        parts: vec![GeminiPart::FunctionResponse {
-                            function_response: GeminiFunctionResponse {
-                                name: tool_call_id.clone(),
-                                response: json!({ "result": msg.content }),
-                            }
-                        }],
-                    });
-                }
-            }
-            // Regular text
-            else {
-                contents.push(GeminiContent {
-                    role: Some(role.to_string()),
-                    parts: vec![GeminiPart::Text { text: msg.content.clone() }],
-                });
-            }
+            contents.push(json!({
+                "role": role,
+                "parts": [{"text": msg.content}]
+            }));
         }
 
         (contents, system_instruction)
     }
 
     /// Convert tools to Gemini format
-    fn convert_tools(&self, tools: &[ToolDefinition]) -> Option<Vec<GeminiTool>> {
-        if tools.is_empty() {
-            return None;
-        }
+    fn convert_tools(&self, tools: &[ToolDefinition]) -> Value {
+        let function_declarations: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters
+                })
+            })
+            .collect();
 
-        let declarations: Vec<GeminiFunctionDeclaration> = tools.iter().map(|t| {
-            GeminiFunctionDeclaration {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.parameters.clone(),
-            }
-        }).collect();
-
-        Some(vec![GeminiTool { function_declarations: declarations }])
+        json!([{
+            "functionDeclarations": function_declarations
+        }])
     }
 
     /// Convert tool choice to Gemini format
-    fn convert_tool_choice(&self, choice: &ToolChoice) -> Option<GeminiToolConfig> {
-        let mode = match choice {
-            ToolChoice::Auto => "AUTO",
-            ToolChoice::None => "NONE",
-            ToolChoice::Required => "ANY",
-            ToolChoice::Tool(_) => "ANY",
-        };
-
-        Some(GeminiToolConfig {
-            function_calling_config: FunctionCallingConfig {
-                mode: mode.to_string(),
-            },
-        })
+    fn convert_tool_choice(&self, choice: &ToolChoice) -> Option<Value> {
+        match choice {
+            ToolChoice::Auto => Some(json!({"mode": "AUTO"})),
+            ToolChoice::Required => Some(json!({"mode": "ANY"})),
+            ToolChoice::None => Some(json!({"mode": "NONE"})),
+            ToolChoice::Tool(name) => Some(json!({
+                "mode": "ANY",
+                "allowedFunctionNames": [name]
+            })),
+        }
     }
 }
 
@@ -563,55 +241,31 @@ impl LlmProvider for AntigravityProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(vec![
-            ModelInfo {
-                id: "gemini-2.0-flash".to_string(),
-                name: "Gemini 2.0 Flash".to_string(),
-                description: Some("Fast, good for tools (FREE TIER)".to_string()),
-                parameters: Some("1M context".to_string()),
+        Ok(ANTIGRAVITY_MODELS
+            .iter()
+            .map(|(id, name, desc)| ModelInfo {
+                id: id.to_string(),
+                name: name.to_string(),
+                description: Some(desc.to_string()),
+                parameters: None,
                 available: true,
-                tags: vec!["chat".to_string(), "tools".to_string()],
+                tags: vec!["gemini".to_string()],
                 downloads: None,
                 updated_at: None,
-            },
-            ModelInfo {
-                id: "gemini-2.0-flash-thinking-exp-01-21".to_string(),
-                name: "Gemini Flash Thinking".to_string(),
-                description: Some("Extended reasoning (FREE TIER)".to_string()),
-                parameters: Some("1M context".to_string()),
-                available: true,
-                tags: vec!["chat".to_string(), "reasoning".to_string()],
-                downloads: None,
-                updated_at: None,
-            },
-            ModelInfo {
-                id: "gemini-1.5-pro".to_string(),
-                name: "Gemini 1.5 Pro".to_string(),
-                description: Some("High quality, 2M context (FREE TIER)".to_string()),
-                parameters: Some("2M context".to_string()),
-                available: true,
-                tags: vec!["chat".to_string(), "high-quality".to_string()],
-                downloads: None,
-                updated_at: None,
-            },
-            ModelInfo {
-                id: "gemini-1.5-flash".to_string(),
-                name: "Gemini 1.5 Flash".to_string(),
-                description: Some("Fast and efficient (FREE TIER)".to_string()),
-                parameters: Some("1M context".to_string()),
-                available: true,
-                tags: vec!["chat".to_string(), "fast".to_string()],
-                downloads: None,
-                updated_at: None,
-            },
-        ])
+            })
+            .collect())
     }
 
-    async fn search_models(&self, query: &str, _limit: usize) -> Result<Vec<ModelInfo>> {
+    async fn search_models(&self, query: &str, limit: usize) -> Result<Vec<ModelInfo>> {
+        let query_lower = query.to_lowercase();
         let models = self.list_models().await?;
         Ok(models
             .into_iter()
-            .filter(|m| m.name.to_lowercase().contains(&query.to_lowercase()))
+            .filter(|m| {
+                m.id.to_lowercase().contains(&query_lower)
+                    || m.name.to_lowercase().contains(&query_lower)
+            })
+            .take(limit)
             .collect())
     }
 
@@ -620,8 +274,8 @@ impl LlmProvider for AntigravityProvider {
         Ok(models.into_iter().find(|m| m.id == model_id))
     }
 
-    async fn is_model_available(&self, _model_id: &str) -> Result<bool> {
-        Ok(true) // Always available for now
+    async fn is_model_available(&self, model_id: &str) -> Result<bool> {
+        Ok(ANTIGRAVITY_MODELS.iter().any(|(id, _, _)| *id == model_id))
     }
 
     async fn chat(&self, model: &str, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
@@ -629,124 +283,154 @@ impl LlmProvider for AntigravityProvider {
         self.chat_with_request(model, request).await
     }
 
-    async fn chat_with_request(&self, model: &str, mut request: ChatRequest) -> Result<ChatResponse> {
-        if let Some(bridge_url) = self.config.bridge_url.as_deref() {
-            return self.chat_with_bridge(bridge_url, model, request).await;
+    async fn chat_with_request(&self, model: &str, request: ChatRequest) -> Result<ChatResponse> {
+        let actual_model = if model.is_empty() || model == "auto" {
+            &self.default_model
+        } else {
+            model
+        };
+
+        let url = format!(
+            "{}/models/{}:generateContent",
+            GEMINI_API_BASE, actual_model
+        );
+
+        let (contents, system_instruction) = self.convert_messages(&request.messages);
+
+        let mut body = json!({
+            "contents": contents,
+        });
+
+        if let Some(sys) = system_instruction {
+            body["systemInstruction"] = sys;
         }
 
-        // Load MCP tools if agentic mode and no tools provided
-        if self.config.agentic_mode && request.tools.is_empty() {
-            if let Ok(tools) = self.load_mcp_tools().await {
-                request.tools = tools;
-                info!("Loaded {} MCP tools for agentic mode", request.tools.len());
+        // Add tools if present
+        if !request.tools.is_empty() {
+            body["tools"] = self.convert_tools(&request.tools);
+            
+            if let Some(tool_config) = self.convert_tool_choice(&request.tool_choice) {
+                body["toolConfig"] = json!({"functionCallingConfig": tool_config});
             }
         }
 
-        // Auto-select model
-        let actual_model = if model == "auto" || model.is_empty() {
-            self.select_model(&request.messages, !request.tools.is_empty())
-        } else {
-            model.to_string()
-        };
+        // Generation config
+        let mut gen_config = json!({});
+        if let Some(temp) = request.temperature {
+            gen_config["temperature"] = json!(temp);
+        }
+        if let Some(max_tokens) = request.max_tokens {
+            gen_config["maxOutputTokens"] = json!(max_tokens);
+        }
+        if let Some(top_p) = request.top_p {
+            gen_config["topP"] = json!(top_p);
+        }
+        if gen_config != json!({}) {
+            body["generationConfig"] = gen_config;
+        }
 
-        // Build URL: {BASE}/models/{model}:generateContent?key={KEY}
-        let api_key = self.config.api_key.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("GEMINI_API_KEY not set for Antigravity Gemini mode")
-        })?;
-        let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            GEMINI_API_BASE,
-            actual_model,
-            api_key
-        );
+        debug!("Antigravity request to: {}", url);
 
-        // Convert to Gemini format
-        let (contents, system_instruction) = self.convert_messages(&request.messages);
-        let tools = self.convert_tools(&request.tools);
-        let tool_config = if tools.is_some() {
-            self.convert_tool_choice(&request.tool_choice)
-        } else {
-            None
-        };
-
-        let gemini_request = GeminiRequest {
-            contents,
-            system_instruction,
-            tools,
-            tool_config,
-            generation_config: Some(GeminiGenerationConfig {
-                temperature: request.temperature,
-                top_p: request.top_p,
-                max_output_tokens: request.max_tokens.map(|t| t as u32),
-            }),
-        };
-
-        debug!("Antigravity request to model: {}", actual_model);
-
-        let response = self.client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&gemini_request)
+        let http_request = self.build_request(&url).await?;
+        let response = http_request
+            .json(&body)
             .send()
             .await
-            .context("Failed to send Gemini request")?;
+            .context("Failed to send request")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Gemini API error {}: {}", status, body));
+            
+            if status.as_u16() == 401 {
+                return Err(anyhow::anyhow!(
+                    "Authentication failed (401).\n\n\
+                    Token may have expired. Try:\n\
+                    1. Reconnect to Antigravity VNC and re-login\n\
+                    2. Run: ./scripts/antigravity-extract-token.sh\n\
+                    3. Restart op-web: sudo systemctl restart op-web"
+                ));
+            }
+            
+            return Err(anyhow::anyhow!("API error {}: {}", status, body));
         }
 
-        let result: GeminiResponse = response.json().await
-            .context("Failed to parse Gemini response")?;
-
-        if let Some(error) = result.error {
-            return Err(anyhow::anyhow!("Gemini API error {}: {}", error.code, error.message));
-        }
+        let result: Value = response.json().await
+            .context("Failed to parse response")?;
 
         // Parse response
-        let candidate = result.candidates
-            .and_then(|c| c.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("No response from Gemini"))?;
+        let candidates = result
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .ok_or_else(|| anyhow::anyhow!("No candidates in response"))?;
 
+        let first_candidate = candidates
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Empty candidates"))?;
+
+        // Extract text and tool calls
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
-        for part in candidate.content.parts {
-            match part {
-                GeminiPart::Text { text } => text_parts.push(text),
-                GeminiPart::FunctionCall { function_call } => {
+        if let Some(parts) = first_candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+        {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    text_parts.push(text.to_string());
+                }
+                if let Some(fc) = part.get("functionCall") {
+                    let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                    let args = fc.get("args").cloned().unwrap_or(json!({}));
                     tool_calls.push(ToolCallInfo {
-                        id: format!("call_{}", tool_calls.len()),
-                        name: function_call.name,
-                        arguments: function_call.args,
+                        id: format!("call_{}", Uuid::new_v4()),
+                        name: name.to_string(),
+                        arguments: args,
                     });
                 }
-                _ => {}
             }
         }
 
-        let text = text_parts.join("");
-        let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls.clone()) };
-
-        let usage = result.usage_metadata.map(|u| TokenUsage {
-            prompt_tokens: u.prompt_token_count.unwrap_or(0),
-            completion_tokens: u.candidates_token_count.unwrap_or(0),
-            total_tokens: u.total_token_count.unwrap_or(0),
+        let usage = result.get("usageMetadata").map(|u| TokenUsage {
+            prompt_tokens: u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            completion_tokens: u
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            total_tokens: u
+                .get("totalTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
         });
 
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".to_string(),
-                content: text,
-                tool_calls: tool_calls_opt.clone(),
+                content: text_parts.join(""),
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls.clone())
+                },
                 tool_call_id: None,
             },
-            model: actual_model,
+            model: actual_model.to_string(),
             provider: "antigravity".to_string(),
-            finish_reason: candidate.finish_reason,
+            finish_reason: first_candidate
+                .get("finishReason")
+                .and_then(|f| f.as_str())
+                .map(String::from),
             usage,
-            tool_calls: tool_calls_opt,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
         })
     }
 
@@ -760,252 +444,5 @@ impl LlmProvider for AntigravityProvider {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let _ = tx.send(Ok(response.message.content)).await;
         Ok(rx)
-    }
-}
-
-impl AntigravityProvider {
-    async fn chat_with_bridge(
-        &self,
-        bridge_url: &str,
-        model: &str,
-        request: ChatRequest,
-    ) -> Result<ChatResponse> {
-        let actual_model = if model == "auto" || model.is_empty() {
-            self.select_model(&request.messages, !request.tools.is_empty())
-        } else {
-            model.to_string()
-        };
-
-        let url = format!("{}/v1/chat/completions", bridge_url.trim_end_matches('/'));
-
-        let messages: Vec<OpenAIMessage> = request
-            .messages
-            .iter()
-            .map(|m| OpenAIMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_calls: m.tool_calls.as_ref().map(|calls| {
-                    calls
-                        .iter()
-                        .map(|c| OpenAIToolCall {
-                            id: c.id.clone(),
-                            call_type: "function".to_string(),
-                            function: OpenAIFunction {
-                                name: c.name.clone(),
-                                arguments: c.arguments.to_string(),
-                            },
-                        })
-                        .collect()
-                }),
-                tool_call_id: m.tool_call_id.clone(),
-            })
-            .collect();
-
-        let tools = if request.tools.is_empty() {
-            None
-        } else {
-            Some(request.tools.iter().map(|t| t.to_openai_format()).collect())
-        };
-
-        let tool_choice = if tools.is_some() {
-            Some(request.tool_choice.to_api_format())
-        } else {
-            None
-        };
-
-        let openai_request = OpenAIRequest {
-            model: actual_model.clone(),
-            messages,
-            tools,
-            tool_choice,
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            top_p: request.top_p,
-        };
-
-        debug!("Antigravity bridge request to {}", url);
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&openai_request)
-            .send()
-            .await
-            .context("Failed to send Antigravity bridge request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("Antigravity bridge error {}: {}", status, body));
-        }
-
-        let result: OpenAIResponse = response
-            .json()
-            .await
-            .context("Failed to parse Antigravity bridge response")?;
-
-        let choice = result
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No response from Antigravity bridge"))?;
-
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = &choice.message.tool_calls {
-            for call in calls {
-                let arguments = serde_json::from_str(&call.function.arguments)
-                    .unwrap_or_else(|_| Value::String(call.function.arguments.clone()));
-                tool_calls.push(ToolCallInfo {
-                    id: call.id.clone(),
-                    name: call.function.name.clone(),
-                    arguments,
-                });
-            }
-        }
-
-        let tool_calls_opt = if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls.clone())
-        };
-
-        let usage = result.usage.map(|u| TokenUsage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
-
-        Ok(ChatResponse {
-            message: ChatMessage {
-                role: choice.message.role,
-                content: choice.message.content,
-                tool_calls: tool_calls_opt.clone(),
-                tool_call_id: choice.message.tool_call_id,
-            },
-            model: result.model.unwrap_or(actual_model),
-            provider: "antigravity".to_string(),
-            finish_reason: choice.finish_reason,
-            usage,
-            tool_calls: tool_calls_opt,
-        })
-    }
-}
-
-// =============================================================================
-// AGENTIC SESSION
-// =============================================================================
-
-/// Agentic session with memory and context
-#[derive(Debug, Clone)]
-pub struct AgenticSession {
-    pub session_id: String,
-    pub user: Option<GoogleUser>,
-    /// Active MCP tools
-    pub tools: Vec<String>,
-    /// Session memory
-    pub memory: std::collections::HashMap<String, Value>,
-    /// Conversation context
-    pub context: Value,
-}
-
-impl AgenticSession {
-    pub fn new(session_id: &str) -> Self {
-        Self {
-            session_id: session_id.to_string(),
-            user: None,
-            tools: vec![
-                "memory_remember".to_string(),
-                "memory_recall".to_string(),
-                "context_manager_save".to_string(),
-                "context_manager_load".to_string(),
-                "sequential_thinking_think".to_string(),
-            ],
-            memory: std::collections::HashMap::new(),
-            context: json!({}),
-        }
-    }
-
-    pub fn with_user(mut self, user: GoogleUser) -> Self {
-        self.user = Some(user);
-        self
-    }
-
-    pub fn remember(&mut self, key: &str, value: Value) {
-        self.memory.insert(key.to_string(), value);
-    }
-
-    pub fn recall(&self, key: &str) -> Option<&Value> {
-        self.memory.get(key)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_config_from_env() {
-        // Will fail without GEMINI_API_KEY but tests the structure
-        std::env::set_var("GEMINI_API_KEY", "test-key");
-        let config = AntigravityConfig::from_env().unwrap();
-        assert_eq!(config.api_key.as_deref(), Some("test-key"));
-        assert!(config.bridge_url.is_none());
-        assert_eq!(config.default_model, "gemini-2.0-flash");
-        std::env::remove_var("GEMINI_API_KEY");
-    }
-
-    #[test]
-    fn test_agentic_session() {
-        let mut session = AgenticSession::new("test-123");
-        session.remember("key", json!("value"));
-        assert_eq!(session.recall("key"), Some(&json!("value")));
-    }
-
-    #[tokio::test]
-    async fn test_provider_creation() {
-        // Test that we can create a provider (will fail without API key but tests structure)
-        std::env::set_var("GEMINI_API_KEY", "test-key");
-        let result = AntigravityProvider::from_env();
-        // Should succeed in creating the provider structure even if API calls would fail
-        assert!(result.is_ok());
-        std::env::remove_var("GEMINI_API_KEY");
-    }
-
-    #[test]
-    fn test_model_selection() {
-        std::env::set_var("GEMINI_API_KEY", "test-key");
-        let provider = AntigravityProvider::from_env().unwrap();
-
-        // Test model selection with different scenarios
-        let simple_messages = vec![crate::provider::ChatMessage {
-            role: "user".to_string(),
-            content: "Hello world".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let model = provider.select_model(&simple_messages, false);
-        assert_eq!(model, "gemini-2.0-flash"); // Fast default
-
-        let code_messages = vec![crate::provider::ChatMessage {
-            role: "user".to_string(),
-            content: "```rust\nfn main() {}\n```".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let model = provider.select_model(&code_messages, false);
-        assert_eq!(model, "gemini-2.0-flash"); // Still fast default
-
-        let reasoning_messages = vec![crate::provider::ChatMessage {
-            role: "user".to_string(),
-            content: "Think step by step about this problem".to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let model = provider.select_model(&reasoning_messages, false);
-        assert_eq!(model, "gemini-2.0-flash-thinking-exp-01-21"); // Reasoning model
-
-        std::env::remove_var("GEMINI_API_KEY");
     }
 }

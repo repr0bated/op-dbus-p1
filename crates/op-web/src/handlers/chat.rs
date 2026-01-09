@@ -39,138 +39,47 @@ pub struct ChatResponse {
 }
 
 /// POST /api/chat - Main chat endpoint (Blocking)
+/// TEMPORARILY DISABLED: LLM providers are disabled
 pub async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
-    info!("Chat request: {} chars, user: {:?}", request.message.len(), request.user_id);
-
-    // Set up user-specific credentials if provided
-    let user_credentials = if let Some(user_id) = &request.user_id {
-        state.user_store.get_user_api_credentials(user_id).await
-    } else {
-        None
-    };
-
-    // Configure chat manager with user credentials if available
-    if let Some(creds) = &user_credentials {
-        if let Some(provider) = &creds.preferred_provider {
-            if let Ok(provider_type) = provider.parse() {
-                let _ = state.chat_manager.switch_provider(provider_type).await;
-            }
-        }
-        // Set user-specific API keys in environment for this request
-        if let Some(key) = &creds.gemini_api_key {
-            std::env::set_var("GEMINI_API_KEY", key);
-        }
-        if let Some(key) = &creds.anthropic_api_key {
-            std::env::set_var("ANTHROPIC_API_KEY", key);
-        }
-        if let Some(key) = &creds.openai_api_key {
-            std::env::set_var("OPENAI_API_KEY", key);
-        }
-    }
-
-    if let Some(model) = request.model.as_ref() {
-        if let Err(e) = state.chat_manager.switch_model(model.clone()).await {
-            error!("Model switch failed: {}", e);
-        }
-    }
+    info!("Chat request: {} chars, user: {:?} (DISABLED)", request.message.len(), request.user_id);
 
     let session_id = request
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Pass None for event_tx to disable streaming
-    // Wrap in timeout to ensure we return an error if it takes too long
-    match tokio::time::timeout(
-        Duration::from_secs(290),
-        state.orchestrator.process(&session_id, &request.message, None)
-    ).await {
-        Ok(Ok(result)) => {
-            let provider = state.chat_manager.current_provider().await;
-            let model = state.chat_manager.current_model().await;
-            Json(ChatResponse {
-                success: result.success,
-                message: Some(result.message),
-                error: None,
-                tools_executed: result.tools_executed,
-                session_id,
-                model,
-                provider: provider.to_string(),
-            })
-        }
-        Ok(Err(e)) => {
-            error!("Chat processing failed: {}", e);
-            let provider = state.chat_manager.current_provider().await;
-            let model = state.chat_manager.current_model().await;
-            Json(ChatResponse {
-                success: false,
-                message: None,
-                error: Some(e.to_string()),
-                tools_executed: vec![],
-                session_id,
-                model,
-                provider: provider.to_string(),
-            })
-        }
-        Err(_) => {
-            error!("Chat processing timed out after 290s");
-            let provider = state.chat_manager.current_provider().await;
-            let model = state.chat_manager.current_model().await;
-            Json(ChatResponse {
-                success: false,
-                message: None,
-                error: Some("Request timed out internally after 290 seconds. The task may still be running in the background.".to_string()),
-                tools_executed: vec![],
-                session_id,
-                model,
-                provider: provider.to_string(),
-            })
-        }
-    }
+    // TEMPORARILY DISABLED: Return disabled response
+    Json(ChatResponse {
+        success: false,
+        message: None,
+        error: Some("LLM providers are temporarily disabled".to_string()),
+        tools_executed: vec![],
+        session_id,
+        model: "disabled".to_string(),
+        provider: "disabled".to_string(),
+    })
 }
 
 /// POST /api/chat/stream - Streaming chat endpoint (SSE)
+/// TEMPORARILY DISABLED: LLM providers are disabled
 pub async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let _requested_model = request.model.clone();
     let session_id = request
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let orchestrator = state.orchestrator.clone();
-    let message = request.message.clone();
+    // Create channel for streaming disabled event
+    let (tx, mut rx) = mpsc::channel(1);
 
-    // Create channel for streaming events
-    let (tx, mut rx) = mpsc::channel(100);
-
-    // Spawn orchestrator task
+    // Send disabled error immediately
     tokio::spawn(async move {
-        // Run process with the sender
-        // We ignore the result here because it's streamed via events
-        // The final event could be a "Finished" event if we wanted, 
-        // but currently we stream intermediate steps.
-        // We could emit a final event with the full response if needed.
-        let result = orchestrator.process(&session_id, &message, Some(tx.clone())).await;
-        
-        // Send final result or error using dedicated event types
-        match result {
-            Ok(response) => {
-                let _ = tx.send(OrchestratorEvent::Finished {
-                    success: response.success,
-                    message: response.message,
-                    tools_executed: response.tools_executed,
-                }).await;
-            }
-            Err(e) => {
-                let _ = tx.send(OrchestratorEvent::Error {
-                    message: e.to_string(),
-                }).await;
-            }
-        }
+        let _ = tx.send(OrchestratorEvent::Error {
+            message: "LLM providers are temporarily disabled".to_string(),
+        }).await;
     });
 
     // Create stream from receiver
