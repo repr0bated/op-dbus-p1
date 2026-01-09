@@ -15,10 +15,11 @@ use tracing::{debug, info, warn};
 use super::agent_service::AgentServiceImpl;
 use super::cache_service::CacheServiceImpl;
 use super::proto::{
-    orchestrator_service_server::OrchestratorService, Capability, Empty, ExecuteAgentsRequest,
-    GetPatternsResponse, OrchestratorRequest, OrchestratorResponse, OrchestratorStats,
-    PatternSuggestion, PromotePatternRequest, PromotePatternResponse, ResolveRequest,
-    ResolveResponse, WorkstackStepResult,
+    agent_service_server::AgentService, orchestrator_service_server::OrchestratorService,
+    Capability, Empty, ExecuteAgentsRequest, FindByCapabilityRequest, GetPatternsResponse,
+    OrchestratorRequest, OrchestratorResponse, OrchestratorStats, PatternSuggestion,
+    PromotePatternRequest, PromotePatternResponse, ResolveRequest, ResolveResponse,
+    WorkstackStepResult,
 };
 
 /// Tracked pattern for promotion suggestions
@@ -81,8 +82,6 @@ impl OrchestratorServiceImpl {
         preferred: &[String],
         excluded: &[String],
     ) -> Result<(Vec<super::proto::Agent>, Vec<i32>, Vec<i32>), Status> {
-        use super::proto::find_by_capability_request::*;
-        use super::proto::FindByCapabilityRequest;
 
         let mut selected_agents = Vec::new();
         let mut fulfilled = HashSet::new();
@@ -100,7 +99,7 @@ impl OrchestratorServiceImpl {
                 match_all: false,
             });
 
-            let response = self.agent_service.find_by_capability(req).await?;
+            let response: tonic::Response<super::proto::FindByCapabilityResponse> = self.agent_service.find_by_capability(req).await?;
             let candidates = response.into_inner().agents;
 
             // Filter excluded and select best

@@ -123,7 +123,6 @@ impl WorkstackCache {
         // Check expiration
         if now > expires_at {
             debug!("Cache entry expired: {}", cache_key);
-            drop(db);
             self.invalidate_entry(&cache_key)?;
             return Ok(None);
         }
@@ -136,7 +135,6 @@ impl WorkstackCache {
         )?;
 
         self.record_hit(&db, workstack_id)?;
-        drop(db);
 
         // Read data
         let data_path = self.cache_dir.join("data").join(&output_file);
@@ -226,7 +224,6 @@ impl WorkstackCache {
             .optional()?;
 
         db.execute("DELETE FROM step_cache WHERE cache_key = ?1", [cache_key])?;
-        drop(db);
 
         if let Some(file) = output_file {
             let _ = std::fs::remove_file(self.cache_dir.join("data").join(&file));
@@ -260,7 +257,6 @@ impl WorkstackCache {
         )?;
 
         drop(stmt);
-        drop(db);
 
         for file in files {
             let _ = std::fs::remove_file(self.cache_dir.join("data").join(&file));
@@ -289,7 +285,6 @@ impl WorkstackCache {
         db.execute("DELETE FROM step_cache WHERE expires_at < ?1", [now])?;
 
         drop(stmt);
-        drop(db);
 
         for (file, _) in expired {
             let _ = std::fs::remove_file(self.cache_dir.join("data").join(&file));

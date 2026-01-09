@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use op_chat::orchestration::skills::{Skill, SkillRegistry};
+use op_chat::{Skill, SkillRegistry};
 use op_tools::registry::ToolDefinition;
 use op_tools::{Tool, ToolRegistry};
 use serde_json::{json, Value};

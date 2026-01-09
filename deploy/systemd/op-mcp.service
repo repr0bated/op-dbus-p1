@@ -10,7 +10,7 @@ User=root
 Group=root
 WorkingDirectory=/opt/op-dbus
 Environment=RUST_LOG=info
-ExecStart=/usr/local/sbin/op-mcp-server --sse 0.0.0.0:8083
+ExecStart=/usr/local/sbin/op-mcp-server --mode agents --sse 0.0.0.0:8083
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

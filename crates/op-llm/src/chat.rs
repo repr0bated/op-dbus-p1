@@ -2,7 +2,6 @@
 //!
 //! Streamlined for production use with essential providers only:
 //! - Gemini 3 (Vertex AI) - Code Assist Enterprise
-//! - Ollama - Local/cloud models
 //! - Claude - Anthropic premium models
 //! - OpenAI - GPT-4 and code models
 
@@ -10,12 +9,12 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use async_trait::async_trait;
 use crate::anthropic::AnthropicClient;
+use crate::antigravity::AntigravityProvider;
 use crate::gemini::GeminiClient;
-use crate::ollama::OllamaCloudClient;
 use crate::provider::{
     BoxedProvider, ChatMessage, ChatRequest, ChatResponse, LlmProvider, ModelInfo, ProviderType,
 };
@@ -24,9 +23,8 @@ use crate::provider::{
 ///
 /// Essential providers for production use:
 /// 1. Gemini 3 (Vertex AI) - Default, included in Code Assist Enterprise
-/// 2. Ollama - Local/cloud models
-/// 3. Claude - Anthropic premium models
-/// 4. OpenAI - GPT-4 and code models
+/// 2. Claude - Anthropic premium models
+/// 3. OpenAI - GPT-4 and code models
 pub struct ChatManager {
     providers: HashMap<ProviderType, BoxedProvider>,
     current_provider: Arc<RwLock<ProviderType>>,
@@ -37,37 +35,62 @@ pub struct ChatManager {
 impl ChatManager {
     /// Create a new chat manager with essential providers only
     ///
-    /// Initializes: Gemini (Vertex), Ollama, Claude, OpenAI
+    /// Initializes: Gemini (Vertex), Claude, OpenAI
+    /// Respects LLM_PROVIDER environment variable for default provider selection
     pub fn new() -> Self {
         let mut providers: HashMap<ProviderType, BoxedProvider> = HashMap::new();
         let mut default_provider = None;
         let mut default_model = "gemini-2.5-flash".to_string(); // Auto-updates to latest 2.5 Flash
 
-        // =====================================================
-        // Gemini 3 (Vertex AI) - DEFAULT
-        // Code Assist Enterprise - included in subscription
-        // =====================================================
-        if let Ok(gemini) = GeminiClient::from_env() {
-            info!("✅ Gemini 3 provider initialized (Vertex AI)");
-            info!("   🏢 Code Assist Enterprise");
-            info!("   🔥 Model: gemini-2.5-flash (auto-updating)");
-            providers.insert(ProviderType::Gemini, Box::new(gemini));
-            default_provider = Some(ProviderType::Gemini);
-            default_model = "gemini-2.5-flash".to_string();
-        } else {
-            debug!("Gemini provider not available (GEMINI_API_KEY not set)");
+        // Check for LLM_PROVIDER and LLM_MODEL environment variables
+        let env_provider = std::env::var("LLM_PROVIDER").ok();
+        let env_model = std::env::var("LLM_MODEL").ok();
+
+        let mut env_provider_type = None;
+        if let Some(provider_name) = &env_provider {
+            if let Ok(provider_type) = provider_name.parse::<ProviderType>() {
+                env_provider_type = Some(provider_type);
+                info!("📋 LLM_PROVIDER environment variable set: {}", provider_name);
+            } else {
+                warn!("⚠️  Invalid LLM_PROVIDER '{}', ignoring", provider_name);
+            }
+        }
+
+        if let Some(model_name) = &env_model {
+            info!("📋 LLM_MODEL environment variable set: {}", model_name);
+            default_model = model_name.clone();
         }
 
         // =====================================================
-        // Ollama - Local or cloud models (fallback only)
+        // Antigravity - IDE Bridge (PRIMARY - Enterprise Billing)
+        // Code Assist Enterprise - ZERO API charges
         // =====================================================
-        // Only load Ollama if no other provider is available
+        if let Ok(antigravity) = AntigravityProvider::from_env() {
+            info!("✅ Antigravity provider initialized (IDE Bridge)");
+            info!("   🏢 Code Assist Enterprise - ZERO charges");
+            info!("   🔥 Models: claude-3-5-sonnet, gpt-4o");
+            providers.insert(ProviderType::Antigravity, Box::new(antigravity));
+            default_provider = Some(ProviderType::Antigravity);
+            default_model = "claude-3-5-sonnet".to_string();
+        } else {
+            info!("⚠️  Antigravity provider failed to initialize - check GEMINI_API_KEY");
+        }
+
+        // =====================================================
+        // Gemini 3 (Vertex AI) - FALLBACK
+        // Code Assist Enterprise - included in subscription
+        // =====================================================
         if default_provider.is_none() {
-            let ollama = OllamaCloudClient::from_env();
-            info!("✅ Ollama provider initialized (fallback)");
-            providers.insert(ProviderType::Ollama, Box::new(ollama));
-            default_provider = Some(ProviderType::Ollama);
-            default_model = "llama3.2".to_string();
+            if let Ok(gemini) = GeminiClient::from_env() {
+                info!("✅ Gemini 3 provider initialized (Vertex AI)");
+                info!("   🏢 Code Assist Enterprise");
+                info!("   🔥 Model: gemini-2.5-flash (auto-updating)");
+                providers.insert(ProviderType::Gemini, Box::new(gemini));
+                default_provider = Some(ProviderType::Gemini);
+                default_model = "gemini-2.5-flash".to_string();
+            } else {
+                debug!("Gemini provider not available (GEMINI_API_KEY not set)");
+            }
         }
 
         // =====================================================
@@ -84,7 +107,31 @@ impl ChatManager {
         // Requires implementing openai.rs module in op-llm crate
         // Will provide access to GPT-4, GPT-4-turbo, etc.
 
-        let default_provider = default_provider.unwrap_or(ProviderType::Ollama);
+        // Use environment provider if set and available, otherwise use auto-selected default
+        let default_provider = if let Some(env_pt) = env_provider_type {
+            if providers.contains_key(&env_pt) {
+                info!("✅ Using LLM_PROVIDER environment variable: {:?}", env_pt);
+                env_pt
+            } else {
+                warn!("⚠️  LLM_PROVIDER '{}' not available, falling back to auto-selected", env_provider.unwrap());
+                default_provider.unwrap_or_else(|| {
+                    providers
+                        .keys()
+                        .next()
+                        .cloned()
+                        .unwrap_or(ProviderType::Antigravity)
+                })
+            }
+        } else {
+            default_provider.unwrap_or_else(|| {
+                providers
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or(ProviderType::Antigravity)
+            })
+        };
+
         info!("\n📊 Default provider: {:?}", default_provider);
         info!("📊 Default model: {}", default_model);
         info!("📊 Total providers available: {}\n", providers.len());
@@ -246,6 +293,114 @@ impl ChatManager {
         provider.chat(&model, messages).await
     }
 
+    /// Send chat message with custom credentials (for per-user authentication)
+    pub async fn chat_with_credentials(
+        &self,
+        messages: Vec<ChatMessage>,
+        gemini_key: Option<&str>,
+        anthropic_key: Option<&str>,
+        _openai_key: Option<&str>,
+    ) -> Result<ChatResponse> {
+        let provider_type = self.current_provider.read().await.clone();
+        let model = self.current_model.read().await.clone();
+
+        // Create a temporary provider with user credentials
+        let provider = match provider_type {
+            ProviderType::Gemini => {
+                if let Some(key) = gemini_key {
+                    // Temporarily set the API key for Gemini
+                    let original_key = std::env::var("GEMINI_API_KEY").ok();
+                    std::env::set_var("GEMINI_API_KEY", key);
+
+                    let result = async {
+                        match crate::gemini::GeminiClient::from_env() {
+                            Ok(client) => {
+                                let boxed: BoxedProvider = Box::new(client);
+                                boxed.chat(&model, messages).await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("Failed to create Gemini client: {}", e)),
+                        }
+                    }.await;
+
+                    // Restore original key
+                    if let Some(orig) = original_key {
+                        std::env::set_var("GEMINI_API_KEY", orig);
+                    } else {
+                        std::env::remove_var("GEMINI_API_KEY");
+                    }
+
+                    return result;
+                }
+                // Fall back to regular provider
+                self.providers
+                    .get(&provider_type)
+                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
+            }
+            ProviderType::Anthropic => {
+                if let Some(key) = anthropic_key {
+                    let original_key = std::env::var("ANTHROPIC_API_KEY").ok();
+                    std::env::set_var("ANTHROPIC_API_KEY", key);
+
+                    let result = async {
+                        match crate::anthropic::AnthropicClient::from_env() {
+                            Ok(client) => {
+                                let boxed: BoxedProvider = Box::new(client);
+                                boxed.chat(&model, messages).await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("Failed to create Anthropic client: {}", e)),
+                        }
+                    }.await;
+
+                    if let Some(orig) = original_key {
+                        std::env::set_var("ANTHROPIC_API_KEY", orig);
+                    } else {
+                        std::env::remove_var("ANTHROPIC_API_KEY");
+                    }
+
+                    return result;
+                }
+                self.providers
+                    .get(&provider_type)
+                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
+            }
+            ProviderType::Antigravity => {
+                if let Some(key) = gemini_key {
+                    // Temporarily set the API key for Antigravity (uses Gemini API)
+                    let original_key = std::env::var("GEMINI_API_KEY").ok();
+                    std::env::set_var("GEMINI_API_KEY", key);
+
+                    let result = async {
+                        match AntigravityProvider::from_env() {
+                            Ok(client) => {
+                                let boxed: BoxedProvider = Box::new(client);
+                                boxed.chat(&model, messages).await
+                            }
+                            Err(e) => Err(anyhow::anyhow!("Failed to create Antigravity client: {}", e)),
+                        }
+                    }.await;
+
+                    // Restore original key
+                    if let Some(orig) = original_key {
+                        std::env::set_var("GEMINI_API_KEY", orig);
+                    } else {
+                        std::env::remove_var("GEMINI_API_KEY");
+                    }
+
+                    return result;
+                }
+                // Fall back to regular provider
+                self.providers
+                    .get(&provider_type)
+                    .ok_or_else(|| anyhow::anyhow!("Provider not available"))?
+            }
+            _ => self.providers
+                .get(&provider_type)
+                .ok_or_else(|| anyhow::anyhow!("Provider not available"))?,
+        };
+
+        provider.chat(&model, messages).await
+    }
+
     /// Send chat message with specific provider and model
     pub async fn chat_with(
         &self,
@@ -296,6 +451,10 @@ impl ChatManager {
                     "~$3/1M input, $15/1M output tokens",
                     vec!["Claude Sonnet 4", "Best reasoning", "Tool use"]
                 ),
+                ProviderType::Antigravity => (
+                    "Enterprise billing (covered by Code Assist)",
+                    vec!["Claude 3.5 Sonnet", "GPT-4o", "Zero API charges"]
+                ),
                 ProviderType::Gemini => (
                     "Free tier available, then pay-per-use",
                     vec!["Gemini 2.5 Flash", "Multimodal", "Long context"]
@@ -303,10 +462,6 @@ impl ChatManager {
                 ProviderType::Perplexity => (
                     "~$5/1000 requests",
                     vec!["Online search", "Real-time data", "Citations"]
-                ),
-                ProviderType::Ollama => (
-                    "Free (local) or cloud pricing",
-                    vec!["Local inference", "No API limits", "Privacy"]
                 ),
                 ProviderType::OpenAI => (
                     "Pay-per-token",

@@ -8,7 +8,6 @@
 //! | Gemini | `https://generativelanguage.googleapis.com/v1beta` | `?key={API_KEY}` |
 //! | Anthropic | `https://api.anthropic.com/v1` | `x-api-key: {KEY}` |
 //! | Perplexity | `https://api.perplexity.ai` | `Bearer {KEY}` |
-//! | Ollama | `https://api.ollama.com` or `localhost:11434` | `Bearer {KEY}` (optional) |
 //!
 //! ## Environment Variables
 //!
@@ -17,21 +16,20 @@
 //! GEMINI_API_KEY=xxx           # Google Gemini  
 //! ANTHROPIC_API_KEY=sk-xxx     # Anthropic Claude
 //! PERPLEXITY_API_KEY=pplx-xxx  # Perplexity
-//! OLLAMA_API_KEY=xxx           # Ollama cloud (optional)
 //! ```
 
 pub mod anthropic;
+pub mod antigravity;
 pub mod chat;
 pub mod gemini;
 pub mod huggingface;
-pub mod ollama;
 pub mod perplexity;
 pub mod provider;
 
 pub use anthropic::AnthropicClient;
+pub use antigravity::AntigravityProvider;
 pub use gemini::GeminiClient;
 pub use huggingface::HuggingFaceClient;
-pub use ollama::OllamaCloudClient;
 pub use perplexity::PerplexityClient;
 pub use provider::{ChatMessage, ChatResponse, LlmProvider, ModelInfo, ProviderConfig, ProviderType};
 
@@ -40,7 +38,6 @@ pub mod prelude {
     pub use super::anthropic::AnthropicClient;
     pub use super::gemini::GeminiClient;
     pub use super::huggingface::HuggingFaceClient;
-    pub use super::ollama::OllamaCloudClient;
     pub use super::perplexity::PerplexityClient;
     pub use super::provider::{ChatMessage, ChatResponse, LlmProvider, ModelInfo, ProviderConfig, ProviderType};
 }

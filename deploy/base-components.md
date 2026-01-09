@@ -39,9 +39,9 @@ This document lists all components included in the base installation.
 - Tool forwarding
 
 ### op-llm
-- Ollama provider
+- Antigravity provider
 - HuggingFace provider
-- Gemini provider (placeholder)
+- Gemini provider
 
 ## Pre-installed MCP Servers
 

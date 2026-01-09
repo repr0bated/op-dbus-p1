@@ -299,13 +299,6 @@ impl Default for ExecutionTracker {
     }
 }
 
-/// Global execution tracker instance
-static GLOBAL_TRACKER: std::sync::OnceLock<ExecutionTracker> = std::sync::OnceLock::new();
-
-/// Get the global execution tracker
-pub fn global_tracker() -> &'static ExecutionTracker {
-    GLOBAL_TRACKER.get_or_init(|| ExecutionTracker::new(1000))
-}
 
 #[cfg(test)]
 mod tests {

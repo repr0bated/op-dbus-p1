@@ -20,6 +20,20 @@ pub struct PrivacyUser {
     pub wg_public_key: String,
     pub wg_private_key_encrypted: String,
     pub assigned_ip: String,
+    /// Google OAuth identity (optional)
+    pub google_id: Option<String>,
+    pub google_email: Option<String>,
+    /// User API credentials for AI services
+    pub api_credentials: Option<UserApiCredentials>,
+}
+
+/// User-specific API credentials for AI services
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserApiCredentials {
+    pub gemini_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub openai_api_key: Option<String>,
+    pub preferred_provider: Option<String>,
 }
 
 /// A magic link for email verification
@@ -34,6 +48,7 @@ pub struct MagicLink {
 pub struct UserStore {
     users: RwLock<HashMap<String, PrivacyUser>>,
     users_by_email: RwLock<HashMap<String, String>>, // email -> user_id
+    users_by_google_id: RwLock<HashMap<String, String>>, // google_id -> user_id
     magic_links: RwLock<HashMap<String, MagicLink>>,
     next_ip: RwLock<u8>, // Last octet for IP assignment (10.100.0.x)
     storage_path: String,
@@ -46,6 +61,7 @@ impl UserStore {
         let store = Self {
             users: RwLock::new(HashMap::new()),
             users_by_email: RwLock::new(HashMap::new()),
+            users_by_google_id: RwLock::new(HashMap::new()),
             magic_links: RwLock::new(HashMap::new()),
             next_ip: RwLock::new(2), // Start at 10.100.0.2
             storage_path,
@@ -69,10 +85,14 @@ impl UserStore {
 
         let mut users = self.users.write().await;
         let mut users_by_email = self.users_by_email.write().await;
+        let mut users_by_google_id = self.users_by_google_id.write().await;
         let mut next_ip = self.next_ip.write().await;
 
         for user in data.users {
             users_by_email.insert(user.email.clone(), user.id.clone());
+            if let Some(ref google_id) = user.google_id {
+                users_by_google_id.insert(google_id.clone(), user.id.clone());
+            }
             users.insert(user.id.clone(), user);
         }
 
@@ -138,6 +158,9 @@ impl UserStore {
             wg_public_key,
             wg_private_key_encrypted,
             assigned_ip: ip,
+            google_id: None,
+            google_email: None,
+            api_credentials: None,
         };
 
         // Store user
@@ -220,6 +243,78 @@ impl UserStore {
         users.get(user_id).cloned()
     }
 
+    /// Get user by Google ID
+    pub async fn get_user_by_google_id(&self, google_id: &str) -> Option<PrivacyUser> {
+        let users_by_google_id = self.users_by_google_id.read().await;
+        let user_id = users_by_google_id.get(google_id)?;
+        let users = self.users.read().await;
+        users.get(user_id).cloned()
+    }
+
+    /// Create or link user with Google identity
+    pub async fn create_or_link_google_user(
+        &self,
+        google_id: &str,
+        google_email: &str,
+        wg_public_key: String,
+        wg_private_key_encrypted: String,
+    ) -> Result<PrivacyUser> {
+        // Check if user already exists with this Google ID
+        if let Some(existing) = self.get_user_by_google_id(google_id).await {
+            return Ok(existing);
+        }
+
+        // Check if user exists with this email (link Google account)
+        if let Some(mut existing) = self.get_user_by_email(google_email).await {
+            // Link Google identity to existing user
+            existing.google_id = Some(google_id.to_string());
+            existing.google_email = Some(google_email.to_string());
+            existing.email_verified = true; // Google accounts are pre-verified
+
+            {
+                let mut users = self.users.write().await;
+                let mut users_by_google_id = self.users_by_google_id.write().await;
+                users.insert(existing.id.clone(), existing.clone());
+                users_by_google_id.insert(google_id.to_string(), existing.id.clone());
+            }
+
+            self.save().await?;
+            info!("Linked Google identity to existing user {}", existing.id);
+            return Ok(existing);
+        }
+
+        // Create new user with Google identity
+        let ip = self.allocate_ip().await;
+        let user = PrivacyUser {
+            id: uuid::Uuid::new_v4().to_string(),
+            email: google_email.to_string(),
+            email_verified: true, // Google accounts are pre-verified
+            created_at: Utc::now(),
+            wg_public_key,
+            wg_private_key_encrypted,
+            assigned_ip: ip,
+            google_id: Some(google_id.to_string()),
+            google_email: Some(google_email.to_string()),
+            api_credentials: None,
+        };
+
+        // Store user
+        {
+            let mut users = self.users.write().await;
+            let mut users_by_email = self.users_by_email.write().await;
+            let mut users_by_google_id = self.users_by_google_id.write().await;
+            users_by_email.insert(user.email.clone(), user.id.clone());
+            users_by_google_id.insert(google_id.to_string(), user.id.clone());
+            users.insert(user.id.clone(), user.clone());
+        }
+
+        // Persist
+        self.save().await.context("Failed to save user")?;
+
+        info!("Created new user {} with Google identity", user.id);
+        Ok(user)
+    }
+
     /// Clean up expired magic links
     pub async fn cleanup_expired_links(&self) {
         let mut links = self.magic_links.write().await;
@@ -230,6 +325,29 @@ impl UserStore {
         if removed > 0 {
             warn!("Cleaned up {} expired magic links", removed);
         }
+    }
+
+    /// Set API credentials for a user
+    pub async fn set_user_api_credentials(
+        &self,
+        user_id: &str,
+        credentials: UserApiCredentials,
+    ) -> Result<()> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(user_id) {
+            user.api_credentials = Some(credentials);
+            self.save().await?;
+            info!("Updated API credentials for user {}", user_id);
+            Ok(())
+        } else {
+            anyhow::bail!("User not found: {}", user_id);
+        }
+    }
+
+    /// Get API credentials for a user
+    pub async fn get_user_api_credentials(&self, user_id: &str) -> Option<UserApiCredentials> {
+        let users = self.users.read().await;
+        users.get(user_id)?.api_credentials.clone()
     }
 }
 

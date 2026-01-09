@@ -26,7 +26,7 @@ pub mod grpc;
 // Re-exports
 pub use protocol::{McpRequest, McpResponse, McpError, JsonRpcError};
 pub use server::{McpServer, McpServerConfig, ToolInfo, ToolExecutor, DefaultToolExecutor};
-pub use agents_server::{AgentsServer, AgentsServerConfig, AlwaysOnAgent};
+pub use agents_server::AgentsServer;
 pub use compact::{CompactServer, run_compact_stdio_server};
 pub use resources::ResourceRegistry;
 pub use transport::{

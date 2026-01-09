@@ -14,9 +14,9 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderType {
     Anthropic,
+    Antigravity,
     Gemini,
     HuggingFace,
-    Ollama,
     OpenAI,
     Perplexity,
 }
@@ -25,9 +25,9 @@ impl fmt::Display for ProviderType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProviderType::Anthropic => write!(f, "anthropic"),
+            ProviderType::Antigravity => write!(f, "antigravity"),
             ProviderType::Gemini => write!(f, "gemini"),
             ProviderType::HuggingFace => write!(f, "huggingface"),
-            ProviderType::Ollama => write!(f, "ollama"),
             ProviderType::OpenAI => write!(f, "openai"),
             ProviderType::Perplexity => write!(f, "perplexity"),
         }
@@ -40,9 +40,9 @@ impl FromStr for ProviderType {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "anthropic" => Ok(ProviderType::Anthropic),
+            "antigravity" => Ok(ProviderType::Antigravity),
             "gemini" => Ok(ProviderType::Gemini),
             "huggingface" | "hugging_face" | "hf" => Ok(ProviderType::HuggingFace),
-            "ollama" => Ok(ProviderType::Ollama),
             "openai" | "open_ai" => Ok(ProviderType::OpenAI),
             "perplexity" => Ok(ProviderType::Perplexity),
             other => Err(format!("Unknown provider type: {}", other)),
@@ -283,6 +283,24 @@ pub struct ModelInfo {
 
 /// Boxed provider for dynamic dispatch
 pub type BoxedProvider = Box<dyn LlmProvider + Send + Sync>;
+
+/// Provider capabilities
+#[derive(Debug, Clone)]
+pub struct ProviderCapabilities {
+    pub streaming: bool,
+    pub tool_use: bool,
+    pub vision: bool,
+    pub embeddings: bool,
+    pub max_context_length: usize,
+}
+
+/// Streaming chunk for real-time responses
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    pub content: String,
+    pub finish_reason: Option<String>,
+    pub usage: Option<TokenUsage>,
+}
 
 /// LLM Provider trait
 #[async_trait]

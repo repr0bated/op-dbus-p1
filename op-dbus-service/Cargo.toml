@@ -28,5 +28,6 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zbus = { workspace = true }
+async-trait = { workspace = true }
 uuid = { workspace = true }
 tonic = "0.11"

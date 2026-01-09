@@ -6,7 +6,6 @@ use tracing::{debug, error, info, warn};
 use op_llm::{
     provider::{ChatMessage, ChatRequest, LlmProvider, ToolChoice, ModelInfo},
 };
-use op_core::types::ChatRole as CoreChatRole;
 
 use super::{UnifiedOrchestrator, OrchestratorResponse, OrchestratorEvent, MAX_TURNS};
 
@@ -82,12 +81,7 @@ The following tools are available via execute_tool():
         );
 
         // Convert role (default to system)
-        let role_str = match system_msg_core.role {
-            CoreChatRole::User => "user",
-            CoreChatRole::Assistant => "assistant",
-            CoreChatRole::System => "system",
-            CoreChatRole::Tool => "tool",
-        }.to_string();
+        let role_str = system_msg_core.role.clone();
 
         let system_msg = ChatMessage {
             role: role_str,

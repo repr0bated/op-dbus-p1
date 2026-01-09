@@ -565,7 +565,6 @@ class MCPChat {
 
     populateProviderDropdown(currentProvider) {
         const providers = [
-            { id: 'ollama', name: 'Ollama Cloud' },
             { id: 'huggingface', name: 'HuggingFace' },
             { id: 'gemini', name: 'Google Gemini' },
             { id: 'grok', name: 'Grok (xAI)' }

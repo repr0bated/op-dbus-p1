@@ -538,6 +538,12 @@ dependencies = [
 
 [[package]]
 name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
@@ -1956,6 +1962,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-tls"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
+dependencies = [
+ "bytes",
+ "hyper 0.14.32",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+]
+
+[[package]]
 name = "hyper-util"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2562,6 +2581,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "mcp-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "op-cache",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2909,6 +2942,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "oauth2"
+version = "4.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c38841cdd844847e3e7c8d29cef9dcfed8877f8f56f9071f77843ecf3baf937f"
+dependencies = [
+ "base64 0.13.1",
+ "chrono",
+ "getrandom 0.2.16",
+ "http 0.2.12",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "object"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2985,21 +3038,27 @@ dependencies = [
 
 [[package]]
 name = "op-cache"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "chrono",
- "libc",
  "log",
  "num_cpus",
+ "prost",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "tempfile",
  "tokio",
+ "tokio-stream",
+ "tokio-test",
+ "tonic",
+ "tonic-build",
  "tracing",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -3051,9 +3110,11 @@ name = "op-dbus-service"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "op-agents",
  "op-blockchain",
+ "op-cache",
  "op-chat",
  "op-core",
  "op-execution-tracker",
@@ -3064,6 +3125,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3236,6 +3298,7 @@ dependencies = [
  "futures",
  "op-chat",
  "op-core",
+ "op-introspection",
  "op-tools",
  "prost",
  "serde",
@@ -3399,6 +3462,8 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "chrono",
+ "clap",
+ "futures",
  "lazy_static",
  "op-core",
  "op-http",
@@ -3431,6 +3496,7 @@ dependencies = [
  "image",
  "lazy_static",
  "lettre",
+ "oauth2",
  "op-agents",
  "op-chat",
  "op-core",
@@ -3444,6 +3510,7 @@ dependencies = [
  "qrcode",
  "rand",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",
@@ -4332,10 +4399,12 @@ dependencies = [
  "http-body 0.4.6",
  "hyper 0.14.32",
  "hyper-rustls",
+ "hyper-tls",
  "ipnet",
  "js-sys",
  "log",
  "mime",
+ "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
@@ -4347,6 +4416,7 @@ dependencies = [
  "sync_wrapper 0.1.2",
  "system-configuration 0.5.1",
  "tokio",
+ "tokio-native-tls",
  "tokio-rustls 0.24.1",
  "tower-service",
  "url",
@@ -6940,6 +7010,34 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.0.16+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]
 
 [[package]]

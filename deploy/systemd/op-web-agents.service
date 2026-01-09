@@ -29,7 +29,7 @@ LimitNOFILE=65536
 LimitNPROC=512
 
 # Start service
-ExecStart=/home/jeremy/op-dbus-v2/target/release/op-web-server
+ExecStart=/usr/local/sbin/op-web-server
 
 # Restart policy
 Restart=always

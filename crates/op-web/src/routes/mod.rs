@@ -73,6 +73,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/privacy/verify", get(handlers::privacy::verify))
         .route("/privacy/config/:user_id", get(handlers::privacy::get_config))
         .route("/privacy/status", get(handlers::privacy::status))
+        .route("/privacy/credentials", post(handlers::privacy::set_credentials))
+        // Google OAuth endpoints
+        .route("/privacy/google/auth", get(handlers::privacy::google_auth))
+        .route("/privacy/google/callback", get(handlers::privacy::google_callback))
         .with_state(state.clone());
 
     // MCP JSON-RPC endpoints (profile-based and legacy)

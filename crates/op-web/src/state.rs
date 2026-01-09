@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
@@ -19,6 +20,39 @@ use crate::sse::SseEventBroadcaster;
 use crate::users::UserStore;
 use crate::email::{EmailConfig, EmailSender};
 use crate::wireguard::WgServerConfig;
+
+/// Google OAuth configuration
+#[derive(Debug, Clone)]
+pub struct GoogleOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+}
+
+/// User-specific API credentials
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserApiCredentials {
+    pub gemini_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub openai_api_key: Option<String>,
+    pub preferred_provider: Option<String>,
+}
+
+impl GoogleOAuthConfig {
+    /// Load configuration from environment variables
+    pub fn from_env() -> Option<Self> {
+        let client_id = std::env::var("GOOGLE_OAUTH_CLIENT_ID").ok()?;
+        let client_secret = std::env::var("GOOGLE_OAUTH_CLIENT_SECRET").ok()?;
+        let redirect_url = std::env::var("GOOGLE_OAUTH_REDIRECT_URL")
+            .unwrap_or_else(|_| "http://localhost:8080/api/privacy/google/callback".to_string());
+
+        Some(Self {
+            client_id,
+            client_secret,
+            redirect_url,
+        })
+    }
+}
 
 /// Application state shared across all handlers
 pub struct AppState {
@@ -50,6 +84,8 @@ pub struct AppState {
     pub server_config: WgServerConfig,
     /// Persistent state store (audit log)
     pub state_store: Arc<dyn StateStore>,
+    /// Google OAuth configuration (optional)
+    pub google_oauth_config: Option<GoogleOAuthConfig>,
 }
 
 impl AppState {
@@ -139,6 +175,14 @@ impl AppState {
         // Load WireGuard server config (will need to be configured properly)
         let server_config = WgServerConfig::default();
 
+        // Load Google OAuth config
+        let google_oauth_config = GoogleOAuthConfig::from_env();
+        if google_oauth_config.is_some() {
+            info!("✅ Google OAuth configured");
+        } else {
+            info!("⚠️  Google OAuth not configured (set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET)");
+        }
+
         // Initialize State Store
         let state_store_path = "/var/lib/op-dbus/state.db";
         let state_store: Arc<dyn StateStore> = match SqliteStore::new(state_store_path).await {
@@ -168,6 +212,7 @@ impl AppState {
             email_sender,
             server_config,
             state_store,
+            google_oauth_config,
         })
     }
 
@@ -214,6 +259,7 @@ async fn register_agent_tools(registry: &Arc<ToolRegistry>) -> anyhow::Result<()
     let descriptors = op_agents::builtin_agent_descriptors();
 
     for descriptor in descriptors {
+        // Create and register the tool wrapper
         let tool = op_tools::builtin::create_agent_tool(
             &descriptor.agent_type,
             &format!("{} - {}", descriptor.name, descriptor.description),

@@ -1780,7 +1780,7 @@ async function loadProvidersAndModels() {
             let currentProvider = data.provider;
             
             // Default to HuggingFace if no provider is set
-            const validProviders = ['huggingface', 'ollama', 'gemini'];
+            const validProviders = ['huggingface', 'gemini'];
             if (!currentProvider || !validProviders.includes(currentProvider)) {
                 currentProvider = 'huggingface';
                 // Switch to default provider if needed
@@ -1801,7 +1801,7 @@ async function loadProvidersAndModels() {
                 }
             }
             
-            // Populate provider dropdown with default order: HuggingFace, Ollama, Gemini
+            // Populate provider dropdown with default order: HuggingFace, Gemini
             populateProviderDropdown(currentProvider);
             
             // Then fetch and populate models for current provider dynamically
@@ -1821,10 +1821,9 @@ async function loadProvidersAndModels() {
 }
 
 function populateProviderDropdown(currentProvider) {
-    // Only show HuggingFace, Ollama, and Gemini (in that order)
+    // Only show HuggingFace and Gemini (in that order)
     const providers = [
         { id: 'huggingface', name: 'HuggingFace' },
-        { id: 'ollama', name: 'Ollama' },
         { id: 'gemini', name: 'Gemini' }
     ];
 

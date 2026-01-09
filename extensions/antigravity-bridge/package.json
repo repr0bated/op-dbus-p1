@@ -1,0 +1,65 @@
+{
+  "name": "op-dbus-antigravity-bridge",
+  "displayName": "OP-DBUS Antigravity Bridge",
+  "description": "Local OpenAI-compatible bridge for IDE-authenticated LLM access.",
+  "version": "0.1.0",
+  "publisher": "op-dbus",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:op-dbus-bridge.start",
+    "onCommand:op-dbus-bridge.stop"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "op-dbus-bridge.start",
+        "title": "OP-DBUS: Start Antigravity Bridge"
+      },
+      {
+        "command": "op-dbus-bridge.stop",
+        "title": "OP-DBUS: Stop Antigravity Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "OP-DBUS Antigravity Bridge",
+      "properties": {
+        "opDbusBridge.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host interface to bind the bridge server."
+        },
+        "opDbusBridge.port": {
+          "type": "number",
+          "default": 3333,
+          "description": "Port to listen on for OpenAI-compatible requests."
+        },
+        "opDbusBridge.modelFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model family selector for IDE chat models."
+        },
+        "opDbusBridge.fallbackCommand": {
+          "type": "string",
+          "default": "cursor.chat.sendMessage",
+          "description": "Fallback IDE command to send the last user message."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "package": "npm run compile",
+    "package:vsix": "npx @vscode/vsce package --out op-dbus-antigravity-bridge.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.26.0",
+    "typescript": "^5.4.5"
+  }
+}

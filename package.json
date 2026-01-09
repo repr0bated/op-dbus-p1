@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "express": "^5.2.1",
+    "node-fetch": "^2.7.0",
     "nvm": "^0.0.4"
   }
 }

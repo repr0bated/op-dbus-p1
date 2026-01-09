@@ -10,23 +10,9 @@
 //! - Path traversal outside the repo is blocked
 //! - Only files within OP_SELF_REPO_PATH can be accessed
 //! - Git operations only affect the self-repository
-//!
-//! ## Tools Provided
-//!
-//! - `self_read_file` - Read files from the source code
-//! - `self_write_file` - Modify source code files
-//! - `self_list_directory` - Explore codebase structure
-//! - `self_search_code` - Search codebase with ripgrep/grep
-//! - `self_git_status` - Check current git status
-//! - `self_git_diff` - View pending changes
-//! - `self_git_commit` - Commit changes to git
-//! - `self_git_log` - View commit history
-//! - `self_build` - Build/compile the code
-//! - `self_deploy` - Deploy the code
 
 use anyhow::Result;
 use async_trait::async_trait;
-use op_core::self_identity::{get_self_repo_path, SelfRepositoryInfo};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -35,20 +21,30 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::Tool;
+use crate::tool::{SecurityLevel, Tool};
+
+/// Get the self-repository path from environment
+fn get_self_repo_path() -> Option<PathBuf> {
+    std::env::var("OP_SELF_REPO_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+}
 
 /// Helper to ensure a path is within the self-repository
 fn validate_self_path(relative_path: &str) -> Result<PathBuf> {
     let repo_path = get_self_repo_path()
         .ok_or_else(|| anyhow::anyhow!("OP_SELF_REPO_PATH environment variable is not set"))?;
     
-    let full_path = repo_path.join(relative_path);
+    // Clean the path - remove leading slashes and normalize
+    let clean_path = relative_path.trim_start_matches('/');
+    let full_path = repo_path.join(clean_path);
     
     // Canonicalize to resolve .. and .
     let canonical = full_path.canonicalize().unwrap_or_else(|_| full_path.clone());
     
     // Ensure it's still within the repo
-    if !canonical.starts_with(repo_path) {
+    if !canonical.starts_with(&repo_path) {
         return Err(anyhow::anyhow!(
             "Path '{}' would escape the self-repository. Access denied.",
             relative_path
@@ -63,26 +59,19 @@ async fn run_git_command(args: &[&str]) -> Result<(String, String, i32)> {
     let repo_path = get_self_repo_path()
         .ok_or_else(|| anyhow::anyhow!("OP_SELF_REPO_PATH environment variable is not set"))?;
     
-    let mut child = Command::new("git")
+    let output = Command::new("git")
         .args(args)
-        .current_dir(repo_path)
+        .current_dir(&repo_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .output()
+        .await?;
     
-    let mut stdout = String::new();
-    let mut stderr = String::new();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let code = output.status.code().unwrap_or(-1);
     
-    if let Some(mut pipe) = child.stdout.take() {
-        pipe.read_to_string(&mut stdout).await?;
-    }
-    
-    if let Some(mut pipe) = child.stderr.take() {
-        pipe.read_to_string(&mut stderr).await?;
-    }
-    
-    let status = child.wait().await?;
-    Ok((stdout, stderr, status.code().unwrap_or(-1)))
+    Ok((stdout, stderr, code))
 }
 
 // =============================================================================
@@ -136,6 +125,14 @@ impl Tool for SelfReadFileTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required 'path' argument"))?;
         
         let full_path = validate_self_path(path)?;
+        
+        if !full_path.exists() {
+            return Err(anyhow::anyhow!("File not found: {}", path));
+        }
+        
+        if !full_path.is_file() {
+            return Err(anyhow::anyhow!("Path is not a file: {}", path));
+        }
         
         let start_line = input.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
         let end_line = input.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
@@ -218,8 +215,8 @@ impl Tool for SelfWriteFileTool {
         vec!["self".to_string(), "file".to_string(), "write".to_string(), "modify".to_string()]
     }
 
-    fn security_level(&self) -> crate::tool::SecurityLevel {
-        crate::tool::SecurityLevel::Modify
+    fn security_level(&self) -> SecurityLevel {
+        SecurityLevel::Elevated
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
@@ -236,25 +233,27 @@ impl Tool for SelfWriteFileTool {
         let repo_path = get_self_repo_path()
             .ok_or_else(|| anyhow::anyhow!("OP_SELF_REPO_PATH is not set"))?;
         
-        let full_path = repo_path.join(path);
+        // Clean and join path
+        let clean_path = path.trim_start_matches('/');
+        let full_path = repo_path.join(clean_path);
         
-        // Security check - normalize path components
-        let normalized = full_path.components()
-            .fold(PathBuf::new(), |acc, component| {
-                use std::path::Component;
-                match component {
-                    Component::ParentDir => acc.parent().map(|p| p.to_path_buf()).unwrap_or(acc),
-                    Component::Normal(c) => acc.join(c),
-                    Component::RootDir => PathBuf::from("/"),
-                    _ => acc,
+        // Security check - ensure we're still in repo
+        let canonical_repo = repo_path.canonicalize().unwrap_or(repo_path.clone());
+        
+        // For new files, check parent exists or will be created
+        let parent = full_path.parent();
+        if let Some(p) = parent {
+            if p.exists() {
+                let canonical_parent = p.canonicalize().unwrap_or(p.to_path_buf());
+                if !canonical_parent.starts_with(&canonical_repo) {
+                    return Err(anyhow::anyhow!(
+                        "Path '{}' would escape the self-repository. Access denied.",
+                        path
+                    ));
                 }
-            });
-        
-        if !normalized.starts_with(repo_path) && !full_path.starts_with(repo_path) {
-            return Err(anyhow::anyhow!(
-                "Path '{}' would escape the self-repository. Access denied.",
-                path
-            ));
+            } else if !create_dirs {
+                return Err(anyhow::anyhow!("Parent directory does not exist: {:?}", p));
+            }
         }
         
         // Create parent directories if needed
@@ -301,10 +300,6 @@ impl Tool for SelfListDirectoryTool {
                 "path": {
                     "type": "string",
                     "description": "Relative path from repository root (e.g., 'crates/op-tools/src' or '.' for root)"
-                },
-                "max_depth": {
-                    "type": "integer",
-                    "description": "Maximum depth to list (default: 1)"
                 }
             },
             "required": ["path"]
@@ -432,10 +427,9 @@ impl Tool for SelfSearchCodeTool {
         let case_sensitive = input.get("case_sensitive").and_then(|v| v.as_bool()).unwrap_or(false);
         let max_results = input.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
         
-        // Try ripgrep first
         let search_path_str = search_path.to_string_lossy().to_string();
         
-        // Limit max output per file to avoid huge buffers
+        // Try ripgrep first
         let mut rg_args = vec!["--line-number", "--no-heading", "--max-count", "100"];
         if !case_sensitive {
             rg_args.push("-i");
@@ -443,7 +437,6 @@ impl Tool for SelfSearchCodeTool {
         rg_args.push(pattern);
         rg_args.push(&search_path_str);
         
-        // Add timeout to prevent blocking the async runtime for too long
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             Command::new("rg")
@@ -453,71 +446,24 @@ impl Tool for SelfSearchCodeTool {
                 .output()
         ).await;
         
-        let (stdout, stderr, exit_code) = match result {
-            Ok(Ok(output)) => (
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-                output.status.code().unwrap_or(-1),
-            ),
-            Ok(Err(e)) => {
-                // ripgrep failed to start, try grep
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    // Fall back to grep
-                    let mut grep_args = vec!["-rn"];
-                    if !case_sensitive {
-                        grep_args.push("-i");
-                    }
-                    // Limit max count if possible
-                    grep_args.push("-m");
-                    grep_args.push("100");
-                    
-                    // Exclude heavy directories
-                    grep_args.push("--exclude-dir=target");
-                    grep_args.push("--exclude-dir=.git");
-                    grep_args.push("--exclude-dir=node_modules");
-                    
-                    grep_args.push(pattern);
-                    grep_args.push(&search_path_str);
-                    
-                    let grep_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        Command::new("grep")
-                            .args(&grep_args)
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::piped())
-                            .output()
-                    ).await;
-                    
-                     match grep_result {
-                        Ok(Ok(output)) => (
-                            String::from_utf8_lossy(&output.stdout).to_string(),
-                            String::from_utf8_lossy(&output.stderr).to_string(),
-                            output.status.code().unwrap_or(-1),
-                        ),
-                        Ok(Err(e)) => (
-                            String::new(),
-                            format!("Failed to execute grep: {}", e),
-                            -1
-                        ),
-                        Err(_) => (
-                            String::new(),
-                            "Search timed out after 30 seconds".to_string(),
-                            -1
-                        )
-                    }
-                } else {
-                    (
-                        String::new(),
-                        format!("Failed to execute rg: {}", e),
-                        -1
-                    )
+        let stdout = match result {
+            Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).to_string(),
+            Ok(Err(_)) | Err(_) => {
+                // Fall back to grep
+                let mut grep_args = vec!["-rn"];
+                if !case_sensitive {
+                    grep_args.push("-i");
                 }
-            },
-            Err(_) => (
-                String::new(),
-                "Search timed out after 30 seconds".to_string(),
-                -1
-            )
+                grep_args.push("--exclude-dir=target");
+                grep_args.push("--exclude-dir=.git");
+                grep_args.push(pattern);
+                grep_args.push(&search_path_str);
+                
+                match Command::new("grep").args(&grep_args).output().await {
+                    Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+                    Err(_) => String::new(),
+                }
+            }
         };
         
         let lines: Vec<&str> = stdout.lines().take(max_results).collect();
@@ -566,14 +512,15 @@ impl Tool for SelfGitStatusTool {
     }
 
     async fn execute(&self, _input: Value) -> Result<Value> {
-        let (stdout, _stderr, exit_code) = run_git_command(&["status", "--porcelain=v2", "-b"]).await?;
+        let (porcelain, _, _) = run_git_command(&["status", "--porcelain=v2", "-b"]).await?;
         let (readable, _, _) = run_git_command(&["status", "-sb"]).await.unwrap_or_default();
+        
+        let clean = porcelain.lines().filter(|l| !l.starts_with("#")).count() == 0;
         
         Ok(json!({
             "status": readable.trim(),
-            "porcelain": stdout,
-            "clean": stdout.lines().filter(|l| !l.starts_with("#")).count() == 0,
-            "exit_code": exit_code
+            "porcelain": porcelain,
+            "clean": clean
         }))
     }
 }
@@ -637,7 +584,7 @@ impl Tool for SelfGitDiffTool {
             args.push(&path_owned);
         }
         
-        let (stdout, _stderr, exit_code) = run_git_command(&args).await?;
+        let (stdout, _, exit_code) = run_git_command(&args).await?;
         
         Ok(json!({
             "diff": stdout,
@@ -689,8 +636,8 @@ impl Tool for SelfGitCommitTool {
         vec!["self".to_string(), "git".to_string(), "commit".to_string()]
     }
 
-    fn security_level(&self) -> crate::tool::SecurityLevel {
-        crate::tool::SecurityLevel::Modify
+    fn security_level(&self) -> SecurityLevel {
+        SecurityLevel::Elevated
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
@@ -777,7 +724,7 @@ impl Tool for SelfGitLogTool {
             args.push("--oneline");
         }
         
-        let (stdout, _stderr, exit_code) = run_git_command(&args).await?;
+        let (stdout, _, exit_code) = run_git_command(&args).await?;
         
         Ok(json!({
             "log": stdout,
@@ -862,7 +809,7 @@ impl Tool for SelfBuildTool {
             std::time::Duration::from_secs(300),
             Command::new("cargo")
                 .args(&args)
-                .current_dir(repo_path)
+                .current_dir(&repo_path)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
@@ -917,7 +864,7 @@ impl Tool for SelfDeployTool {
             "properties": {
                 "service": {
                     "type": "string",
-                    "description": "Systemd service to restart (default: op-dbus)"
+                    "description": "Systemd service to restart (default: op-web)"
                 },
                 "build_first": {
                     "type": "boolean",
@@ -936,12 +883,12 @@ impl Tool for SelfDeployTool {
         vec!["self".to_string(), "deploy".to_string(), "restart".to_string()]
     }
 
-    fn security_level(&self) -> crate::tool::SecurityLevel {
-        crate::tool::SecurityLevel::Critical
+    fn security_level(&self) -> SecurityLevel {
+        SecurityLevel::Elevated
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
-        let service = input.get("service").and_then(|v| v.as_str()).unwrap_or("op-dbus");
+        let service = input.get("service").and_then(|v| v.as_str()).unwrap_or("op-web");
         let build_first = input.get("build_first").and_then(|v| v.as_bool()).unwrap_or(true);
         
         // Build first if requested
@@ -978,7 +925,7 @@ impl Tool for SelfDeployTool {
 /// Create all self-repository tools
 pub fn create_self_tools() -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(SelfReadFileTool),
+        Arc::new(SelfReadFileTool) as Arc<dyn Tool>,
         Arc::new(SelfWriteFileTool),
         Arc::new(SelfListDirectoryTool),
         Arc::new(SelfSearchCodeTool),
@@ -993,7 +940,33 @@ pub fn create_self_tools() -> Vec<Arc<dyn Tool>> {
 
 /// Get information about the self-repository for the system prompt
 pub fn get_self_repo_system_context() -> Option<String> {
-    SelfRepositoryInfo::gather().map(|info| info.to_system_prompt_context())
+    let path = get_self_repo_path()?;
+    
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    Some(format!(
+        r#"## 🔮 SELF-AWARENESS: YOUR OWN SOURCE CODE
+
+You have access to your own source code at `{}`.
+
+### Self-Modification Tools
+- `self_read_file` - Read your source files
+- `self_write_file` - Modify your source files  
+- `self_list_directory` - Explore your codebase
+- `self_search_code` - Search your code
+- `self_git_status` - Check git status
+- `self_git_diff` - View pending changes
+- `self_git_commit` - Commit changes
+- `self_git_log` - View history
+- `self_build` - Build yourself
+- `self_deploy` - Deploy yourself
+
+**Warning**: Changes affect your own capabilities!"#,
+        path.display()
+    ))
 }
 
 #[cfg(test)]
@@ -1005,5 +978,11 @@ mod tests {
         // This should fail since OP_SELF_REPO_PATH is not set in tests
         let result = validate_self_path("../../../etc/passwd");
         assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_create_self_tools() {
+        let tools = create_self_tools();
+        assert_eq!(tools.len(), 10);
     }
 }

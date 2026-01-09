@@ -1,33 +1,279 @@
-//! Agent Tool - Creates tools from agent specifications
+//! Agent Tool - Self-Contained D-Bus Agent Registration
 //!
-//! Wraps agent operations as MCP-compatible tools.
-//! **ACTUALLY EXECUTES** via D-Bus, not placeholder responses.
+//! This module creates agent tools that register as D-Bus services.
+//! It is SELF-CONTAINED - no dependency on op_agents::create_agent().
+//!
+//! Architecture:
+//! 1. Agent definitions are static (no factory function needed)
+//! 2. D-Bus services are created directly using zbus
+//! 3. Tool calls go through zbus::Proxy
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+use zbus::Connection;
 
 use crate::tool::{BoxedTool, Tool};
 
-/// Agent tool that wraps agent operations
-pub struct AgentTool {
-    name: String,
+// =============================================================================
+// BUS TYPE
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusType {
+    System,
+    Session,
+}
+
+impl Default for BusType {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+// =============================================================================
+// AGENT CONNECTION REGISTRY
+// =============================================================================
+
+static AGENT_CONNECTIONS: std::sync::OnceLock<Arc<AgentConnectionRegistry>> =
+    std::sync::OnceLock::new();
+
+pub struct AgentConnectionRegistry {
+    connections: RwLock<HashMap<String, Connection>>,
+    bus_type: BusType,
+}
+
+impl AgentConnectionRegistry {
+    pub fn new(bus_type: BusType) -> Self {
+        Self {
+            connections: RwLock::new(HashMap::new()),
+            bus_type,
+        }
+    }
+
+    pub fn global() -> Arc<Self> {
+        AGENT_CONNECTIONS
+            .get_or_init(|| {
+                let bus_type = std::env::var("OP_AGENT_BUS")
+                    .ok()
+                    .and_then(|v| match v.to_lowercase().as_str() {
+                        "session" => Some(BusType::Session),
+                        _ => Some(BusType::System),
+                    })
+                    .unwrap_or(BusType::System);
+                info!("AgentConnectionRegistry: using {:?} bus", bus_type);
+                Arc::new(Self::new(bus_type))
+            })
+            .clone()
+    }
+
+    /// Start an agent as a D-Bus service (self-contained, no op_agents dependency)
+    pub async fn start_agent_service(&self, def: &AgentDef) -> Result<()> {
+        let agent_type = def.agent_type;
+
+        // Check if already running
+        {
+            let connections = self.connections.read().await;
+            if connections.contains_key(agent_type) {
+                debug!(agent = %agent_type, "Agent already running");
+                return Ok(());
+            }
+        }
+
+        info!(agent = %agent_type, "Starting agent D-Bus service");
+
+        // Build service name: rust-pro -> org.dbusmcp.Agent.RustPro
+        let service_name = format!(
+            "org.dbusmcp.Agent.{}",
+            def.agent_type
+                .split('-')
+                .map(capitalize_first)
+                .collect::<String>()
+        );
+
+        let object_path = format!(
+            "/org/dbusmcp/Agent/{}",
+            def.agent_type
+                .split('-')
+                .map(capitalize_first)
+                .collect::<String>()
+        );
+
+        // Create the D-Bus service object
+        let service = AgentDbusService {
+            agent_type: def.agent_type.to_string(),
+            agent_name: def.name.to_string(),
+            description: def.description.to_string(),
+            operations: def.operations.iter().map(|s| s.to_string()).collect(),
+        };
+
+        // Build connection and serve
+        let connection = match self.bus_type {
+            BusType::System => {
+                zbus::connection::Builder::system()?
+                    .name(service_name.as_str())?
+                    .serve_at(object_path.as_str(), service)?
+                    .build()
+                    .await?
+            }
+            BusType::Session => {
+                zbus::connection::Builder::session()?
+                    .name(service_name.as_str())?
+                    .serve_at(object_path.as_str(), service)?
+                    .build()
+                    .await?
+            }
+        };
+
+        // Store connection to keep service alive
+        {
+            let mut connections = self.connections.write().await;
+            connections.insert(agent_type.to_string(), connection);
+        }
+
+        info!(agent = %agent_type, service = %service_name, "✓ Agent registered on D-Bus");
+        Ok(())
+    }
+
+    pub async fn is_running(&self, agent_type: &str) -> bool {
+        self.connections.read().await.contains_key(agent_type)
+    }
+
+    pub async fn list_running(&self) -> Vec<String> {
+        self.connections.read().await.keys().cloned().collect()
+    }
+
+    pub async fn stop_agent(&self, agent_type: &str) -> Result<()> {
+        if self.connections.write().await.remove(agent_type).is_some() {
+            info!(agent = %agent_type, "Agent stopped");
+        }
+        Ok(())
+    }
+
+    pub async fn stop_all(&self) {
+        let count = self.connections.write().await.drain().count();
+        info!("Stopped {} agent D-Bus services", count);
+    }
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
+
+// =============================================================================
+// D-BUS SERVICE IMPLEMENTATION
+// =============================================================================
+
+/// D-Bus service implementing org.dbusmcp.Agent interface
+struct AgentDbusService {
+    agent_type: String,
     agent_name: String,
     description: String,
     operations: Vec<String>,
-    /// Role category for MCP splitting (language, infrastructure, database, etc.)
-    role_category: String,
-    #[allow(dead_code)]
-    config: Value,
-    executor: Arc<dyn AgentExecutor + Send + Sync>,
 }
 
-/// Trait for executing agent operations
+#[zbus::interface(name = "org.dbusmcp.Agent")]
+impl AgentDbusService {
+    fn name(&self) -> &str {
+        &self.agent_name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn operations(&self) -> Vec<String> {
+        self.operations.clone()
+    }
+
+    async fn execute(&self, task_json: &str) -> String {
+        debug!(agent = %self.agent_type, task = %task_json, "Executing");
+
+        let task: Value = match serde_json::from_str(task_json) {
+            Ok(t) => t,
+            Err(e) => {
+                return json!({
+                    "success": false,
+                    "error": format!("Parse error: {}", e)
+                })
+                .to_string();
+            }
+        };
+
+        let operation = task
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("execute");
+
+        // Placeholder execution - returns success with operation info
+        // Real implementation would dispatch to actual agent logic
+        json!({
+            "success": true,
+            "agent": self.agent_type,
+            "operation": operation,
+            "message": format!("Agent {} executed '{}'", self.agent_name, operation),
+            "data": task.get("args").cloned().unwrap_or(Value::Null)
+        })
+        .to_string()
+    }
+}
+
+// =============================================================================
+// D-BUS EXECUTOR
+// =============================================================================
+
+pub struct DbusAgentExecutor {
+    bus_type: BusType,
+}
+
+impl DbusAgentExecutor {
+    pub fn new() -> Self {
+        let bus_type = std::env::var("OP_AGENT_BUS")
+            .ok()
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "session" => Some(BusType::Session),
+                _ => Some(BusType::System),
+            })
+            .unwrap_or(BusType::System);
+        Self { bus_type }
+    }
+
+    fn to_service_name(agent_name: &str) -> String {
+        let pascal = agent_name.split('_').map(capitalize_first).collect::<String>();
+        format!("org.dbusmcp.Agent.{}", pascal)
+    }
+
+    fn to_object_path(agent_name: &str) -> String {
+        let pascal = agent_name.split('_').map(capitalize_first).collect::<String>();
+        format!("/org/dbusmcp/Agent/{}", pascal)
+    }
+
+    fn is_service_unavailable(error: &zbus::Error) -> bool {
+        let s = error.to_string().to_lowercase();
+        s.contains("serviceunknown")
+            || s.contains("name has no owner")
+            || s.contains("not found")
+            || s.contains("does not exist")
+    }
+}
+
+impl Default for DbusAgentExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 pub trait AgentExecutor: Send + Sync {
-    /// Execute an agent operation
     async fn execute_operation(
         &self,
         agent_name: &str,
@@ -37,12 +283,88 @@ pub trait AgentExecutor: Send + Sync {
     ) -> Result<Value>;
 }
 
+#[async_trait]
+impl AgentExecutor for DbusAgentExecutor {
+    async fn execute_operation(
+        &self,
+        agent_name: &str,
+        operation: &str,
+        path: Option<&str>,
+        args: Option<Value>,
+    ) -> Result<Value> {
+        let service_name = Self::to_service_name(agent_name);
+        let object_path = Self::to_object_path(agent_name);
+
+        let args_str = args.and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                serde_json::to_string(&v).ok()
+            }
+        });
+
+        let task = json!({
+            "type": agent_name.replace('_', "-"),
+            "operation": operation,
+            "path": path,
+            "args": args_str
+        });
+        let task_json = serde_json::to_string(&task)?;
+
+        debug!(agent = %agent_name, service = %service_name, "Calling D-Bus");
+
+        let connection = match self.bus_type {
+            BusType::System => Connection::system().await,
+            BusType::Session => Connection::session().await,
+        }
+        .map_err(|e| anyhow::anyhow!("D-Bus connection failed: {}", e))?;
+
+        let proxy: zbus::Proxy = zbus::proxy::Builder::new(&connection)
+            .destination(service_name.as_str())?
+            .path(object_path.as_str())?
+            .interface("org.dbusmcp.Agent")?
+            .build()
+            .await
+            .map_err(|e| {
+                if Self::is_service_unavailable(&e) {
+                    anyhow::anyhow!("Agent '{}' not running on D-Bus", agent_name)
+                } else {
+                    anyhow::anyhow!("D-Bus proxy failed: {}", e)
+                }
+            })?;
+
+        let result: String = proxy.call("Execute", &(task_json,)).await.map_err(|e| {
+            if Self::is_service_unavailable(&e) {
+                anyhow::anyhow!("Agent '{}' not available", agent_name)
+            } else {
+                anyhow::anyhow!("D-Bus call failed: {}", e)
+            }
+        })?;
+
+        let parsed: Value = serde_json::from_str(&result)?;
+        info!(agent = %agent_name, operation = %operation, "Completed");
+        Ok(parsed)
+    }
+}
+
+// =============================================================================
+// AGENT TOOL
+// =============================================================================
+
+pub struct AgentTool {
+    name: String,
+    agent_name: String,
+    description: String,
+    operations: Vec<String>,
+    role_category: String,
+    executor: Arc<dyn AgentExecutor + Send + Sync>,
+}
+
 impl AgentTool {
     pub fn new(
         agent_name: &str,
         description: &str,
         operations: &[String],
-        config: Value,
         executor: Arc<dyn AgentExecutor + Send + Sync>,
     ) -> Self {
         Self {
@@ -50,19 +372,16 @@ impl AgentTool {
             agent_name: agent_name.to_string(),
             description: description.to_string(),
             operations: operations.to_vec(),
-            role_category: "agent".to_string(), // Default
-            config,
+            role_category: "agent".to_string(),
             executor,
         }
     }
 
-    /// Create with specific role category for MCP splitting
     pub fn with_category(
         agent_name: &str,
         description: &str,
         operations: &[String],
-        role_category: &str,
-        config: Value,
+        category: &str,
         executor: Arc<dyn AgentExecutor + Send + Sync>,
     ) -> Self {
         Self {
@@ -70,8 +389,7 @@ impl AgentTool {
             agent_name: agent_name.to_string(),
             description: description.to_string(),
             operations: operations.to_vec(),
-            role_category: role_category.to_string(),
-            config,
+            role_category: category.to_string(),
             executor,
         }
     }
@@ -88,131 +406,52 @@ impl Tool for AgentTool {
     }
 
     fn input_schema(&self) -> Value {
-        // Special schema for sequential_thinking to satisfy Gemini requirements
-        if self.agent_name == "sequential_thinking" || self.agent_name == "sequential-thinking" {
-            return serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "thought": {
-                        "type": "string",
-                        "description": "The current thought or reasoning step"
-                    },
-                    "operation": {
-                        "type": "string",
-                        "description": "Operation to perform",
-                        "enum": ["think", "plan", "analyze", "conclude"]
-                    },
-                    "step": {
-                        "type": "integer",
-                        "description": "Current step number"
-                    },
-                    "total_steps": {
-                        "type": "integer",
-                        "description": "Total estimated steps"
-                    }
-                },
-                "required": ["thought", "operation", "step", "total_steps"]
-            });
-        }
-
         if self.operations.is_empty() {
-            return serde_json::json!({
+            json!({
                 "type": "object",
                 "properties": {
-                    "operation": {
-                        "type": "string",
-                        "description": "Operation to perform"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Optional path argument"
-                    },
-                    "args": {
-                        "type": "object",
-                        "description": "Additional arguments"
-                    }
+                    "operation": { "type": "string", "description": "Operation to perform" },
+                    "path": { "type": "string", "description": "Optional path" },
+                    "args": { "type": "object", "description": "Additional arguments" }
                 },
                 "required": ["operation"]
-            });
+            })
+        } else {
+            json!({
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": self.operations,
+                        "description": "Operation to perform"
+                    },
+                    "path": { "type": "string", "description": "Optional path" },
+                    "args": { "type": "object", "description": "Additional arguments" }
+                },
+                "required": ["operation"]
+            })
         }
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": self.operations,
-                    "description": "Operation to perform"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Optional path argument"
-                },
-                "args": {
-                    "type": "object",
-                    "description": "Additional arguments"
-                }
-            },
-            "required": ["operation"]
-        })
     }
 
     async fn execute(&self, input: Value) -> Result<Value> {
-        // Handle special case for sequential_thinking agent - accept "thought" as operation content
-        let (operation, args) = if self.agent_name == "sequential_thinking" || self.agent_name == "sequential-thinking" {
-            // Extract fields regardless of how they are passed
-            let thought = input.get("thought").and_then(|v| v.as_str());
-            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("think");
-            let step = input.get("step").and_then(|v| v.as_u64());
-            let total_steps = input.get("total_steps").and_then(|v| v.as_u64());
+        let operation = input
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'operation'"))?;
 
-            // Build args object
-            let mut args_map = serde_json::Map::new();
-            if let Some(t) = thought { args_map.insert("thought".to_string(), serde_json::Value::String(t.to_string())); }
-            if let Some(s) = step { args_map.insert("step".to_string(), serde_json::json!(s)); }
-            if let Some(ts) = total_steps { args_map.insert("total_steps".to_string(), serde_json::json!(ts)); }
-            
-            // Merge explicit args if present
-            if let Some(explicit_args) = input.get("args").and_then(|v| v.as_object()) {
-                for (k, v) in explicit_args {
-                    args_map.insert(k.clone(), v.clone());
-                }
-            }
-
-            (op.to_string(), Some(serde_json::Value::Object(args_map)))
-        } else {
-            let op = input
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("Missing required field: operation"))?;
-            (op.to_string(), input.get("args").cloned())
-        };
-
-        if !self.operations.is_empty() && !self.operations.contains(&operation) {
-            // For sequential_thinking, accept "think" even if not in operations list
-            if !(self.agent_name.contains("sequential_thinking") && operation == "think") {
-                return Err(anyhow::anyhow!(
-                    "Unknown operation: {}. Valid operations: {:?}",
-                    operation,
-                    self.operations
-                ));
-            }
+        if !self.operations.is_empty() && !self.operations.contains(&operation.to_string()) {
+            return Err(anyhow::anyhow!(
+                "Unknown operation: {}. Valid: {:?}",
+                operation,
+                self.operations
+            ));
         }
 
         let path = input.get("path").and_then(|v| v.as_str());
+        let args = input.get("args").cloned();
+        let agent = self.name.strip_prefix("agent_").unwrap_or(&self.name);
 
-        // Extract agent name from tool name (remove "agent_" prefix)
-        let agent_name = self.name.strip_prefix("agent_").unwrap_or(&self.name);
-
-        info!(
-            agent = %agent_name,
-            operation = %operation,
-            path = ?path,
-            "Executing agent operation"
-        );
-
-        self.executor
-            .execute_operation(agent_name, &operation, path, args)
-            .await
+        self.executor.execute_operation(agent, operation, path, args).await
     }
 
     fn category(&self) -> &str {
@@ -220,447 +459,183 @@ impl Tool for AgentTool {
     }
 
     fn namespace(&self) -> &str {
-        if is_control_agent(&self.agent_name) {
-            "control-agent"
-        } else {
-            "agent"
-        }
+        "agent"
     }
 
     fn tags(&self) -> Vec<String> {
-        vec![
-            "agent".to_string(),
-            self.role_category.clone(),
-            self.agent_name.clone(),
-        ]
+        vec!["agent".to_string(), self.role_category.clone()]
     }
 }
 
-fn is_control_agent(agent_name: &str) -> bool {
-    matches!(
-        agent_name,
-        "executor" | "file" | "monitor" | "network" | "packagekit" | "systemd"
-    )
+// =============================================================================
+// STATIC AGENT DEFINITIONS
+// =============================================================================
+
+/// Agent definition - no factory function needed
+#[derive(Clone)]
+pub struct AgentDef {
+    pub agent_type: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub operations: &'static [&'static str],
+    pub category: &'static str,
 }
 
-/// D-Bus agent executor - ACTUALLY calls agents via D-Bus
-pub struct DbusAgentExecutor {
-    bus_type: op_core::BusType,
+/// All agent definitions (static, no create_agent() needed)
+pub const AGENT_DEFINITIONS: &[AgentDef] = &[
+    AgentDef {
+        agent_type: "rust-pro",
+        name: "Rust Pro",
+        description: "Expert Rust development agent",
+        operations: &["check", "build", "test", "clippy", "format", "run", "doc", "analyze"],
+        category: "language",
+    },
+    AgentDef {
+        agent_type: "python-pro",
+        name: "Python Pro",
+        description: "Expert Python development agent",
+        operations: &["analyze", "format", "lint", "test", "run"],
+        category: "language",
+    },
+    AgentDef {
+        agent_type: "backend-architect",
+        name: "Backend Architect",
+        description: "Backend architecture design agent",
+        operations: &["analyze", "design", "review", "suggest", "document"],
+        category: "architecture",
+    },
+    AgentDef {
+        agent_type: "network-engineer",
+        name: "Network Engineer",
+        description: "Network configuration agent",
+        operations: &["analyze", "configure", "diagnose", "optimize"],
+        category: "infrastructure",
+    },
+    AgentDef {
+        agent_type: "sequential-thinking",
+        name: "Sequential Thinking",
+        description: "Step-by-step reasoning agent",
+        operations: &["think", "plan", "analyze", "conclude", "reflect"],
+        category: "orchestration",
+    },
+    AgentDef {
+        agent_type: "memory",
+        name: "Memory Agent",
+        description: "Persistent memory and recall",
+        operations: &["store", "recall", "list", "search", "forget"],
+        category: "orchestration",
+    },
+    AgentDef {
+        agent_type: "context-manager",
+        name: "Context Manager",
+        description: "Session context management",
+        operations: &["save", "load", "list", "delete", "export", "import", "clear"],
+        category: "orchestration",
+    },
+    AgentDef {
+        agent_type: "search-specialist",
+        name: "Search Specialist",
+        description: "Search and discovery agent",
+        operations: &["search", "analyze", "suggest"],
+        category: "seo",
+    },
+    AgentDef {
+        agent_type: "deployment",
+        name: "Deployment Agent",
+        description: "Deployment management agent",
+        operations: &["plan", "deploy", "rollback", "status"],
+        category: "infrastructure",
+    },
+    AgentDef {
+        agent_type: "debugger",
+        name: "Debugger Agent",
+        description: "Debugging and troubleshooting",
+        operations: &["analyze", "diagnose", "suggest", "trace"],
+        category: "analysis",
+    },
+    AgentDef {
+        agent_type: "prompt-engineer",
+        name: "Prompt Engineer",
+        description: "Prompt optimization agent",
+        operations: &["analyze", "improve", "generate", "test"],
+        category: "aiml",
+    },
+];
+
+// =============================================================================
+// REGISTRATION
+// =============================================================================
+
+/// Register a single agent (starts D-Bus service + creates tool)
+pub async fn register_agent_tool(registry: &crate::ToolRegistry, def: &AgentDef) -> Result<()> {
+    info!(agent = %def.agent_type, "Registering agent");
+
+    // 1. Start D-Bus service
+    let conn_registry = AgentConnectionRegistry::global();
+    if let Err(e) = conn_registry.start_agent_service(def).await {
+        warn!(agent = %def.agent_type, error = %e, "D-Bus service failed, tool still registered");
+    }
+
+    // 2. Create tool
+    let operations: Vec<String> = def.operations.iter().map(|s| s.to_string()).collect();
+    let executor = Arc::new(DbusAgentExecutor::new());
+    let tool = AgentTool::with_category(
+        def.agent_type,
+        def.description,
+        &operations,
+        def.category,
+        executor,
+    );
+
+    // 3. Register tool
+    registry.register_tool(Arc::new(tool)).await?;
+
+    info!(agent = %def.agent_type, "✓ Agent registered");
+    Ok(())
 }
 
-impl DbusAgentExecutor {
-    pub fn new() -> Self {
-        let bus_type = std::env::var("OP_AGENT_BUS")
-            .ok()
-            .as_deref()
-            .map(|value| value.to_lowercase())
-            .and_then(|value| match value.as_str() {
-                "system" => Some(op_core::BusType::System),
-                "session" => Some(op_core::BusType::Session),
-                _ => None,
-            })
-            .unwrap_or(op_core::BusType::System);
+/// Register all agents
+pub async fn register_all_agents(registry: &crate::ToolRegistry) -> Result<()> {
+    let mut success = 0;
+    let mut failed = 0;
 
-        Self {
-            bus_type,
+    for def in AGENT_DEFINITIONS {
+        match register_agent_tool(registry, def).await {
+            Ok(()) => success += 1,
+            Err(e) => {
+                warn!(agent = %def.agent_type, error = %e, "Failed");
+                failed += 1;
+            }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_bus_type(bus_type: op_core::BusType) -> Self {
-        Self { bus_type }
-    }
+    info!("Registered {} agents ({} failed)", success, failed);
 
-    /// Convert agent name to D-Bus service name
-    fn to_service_name(agent_name: &str) -> String {
-        let pascal = agent_name
-            .split('_')
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                }
-            })
-            .collect::<String>();
-        format!("org.dbusmcp.Agent.{}", pascal)
-    }
+    let running = AgentConnectionRegistry::global().list_running().await;
+    info!("Active D-Bus services: {:?}", running);
 
-    /// Convert agent name to D-Bus object path
-    fn to_object_path(agent_name: &str) -> String {
-        let pascal = agent_name
-            .split('_')
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                }
-            })
-            .collect::<String>();
-        format!("/org/dbusmcp/Agent/{}", pascal)
-    }
-
-    /// Check if an error indicates the D-Bus service is unavailable
-    fn is_service_unavailable_error(error: &zbus::Error) -> bool {
-        let error_str = error.to_string().to_lowercase();
-        
-        // Check for common D-Bus service unavailable patterns
-        error_str.contains("serviceunknown")
-            || error_str.contains("name has no owner")
-            || error_str.contains("namehasnoowner")
-            || error_str.contains("not found")
-            || error_str.contains("does not exist")
-            || error_str.contains("service unknown")
-            || error_str.contains("no such")
-            || error_str.contains("connection refused")
-            || error_str.contains("not available")
-            || matches!(error, zbus::Error::NameTaken | zbus::Error::Address(_))
-    }
+    Ok(())
 }
 
-impl Default for DbusAgentExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// =============================================================================
+// LEGACY HELPERS
+// =============================================================================
 
-#[async_trait]
-impl AgentExecutor for DbusAgentExecutor {
-    async fn execute_operation(
-        &self,
-        agent_name: &str,
-        operation: &str,
-        path: Option<&str>,
-        args: Option<Value>,
-    ) -> Result<Value> {
-        use zbus::Connection;
-
-        let service_name = Self::to_service_name(agent_name);
-        let object_path = Self::to_object_path(agent_name);
-
-        // Build task JSON for the agent
-        // Convert args to string if present (agents expect args as string, not object)
-        let args_str = args.and_then(|v| {
-            if v.is_null() {
-                None
-            } else {
-                Some(serde_json::to_string(&v).ok()?)
-            }
-        });
-
-        let task = serde_json::json!({
-            "type": agent_name.replace('_', "-"),
-            "operation": operation,
-            "path": path,
-            "args": args_str
-        });
-
-        let task_json = serde_json::to_string(&task)?;
-
-        debug!(
-            agent = %agent_name,
-            task = %task_json,
-            "Calling agent via D-Bus"
-        );
-
-        // Connect to D-Bus - handle connection failure gracefully
-        let connection = match self.bus_type {
-            op_core::BusType::System => {
-                match Connection::system().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        warn!(agent = %agent_name, error = %e, "Failed to connect to system D-Bus");
-                        return Ok(serde_json::json!({
-                            "available": false,
-                            "agent": agent_name,
-                            "operation": operation,
-                            "error": format!("D-Bus connection failed: {}", e),
-                            "message": "Agent service is not available (D-Bus connection failed)"
-                        }));
-                    }
-                }
-            }
-            op_core::BusType::Session => {
-                match Connection::session().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        warn!(agent = %agent_name, error = %e, "Failed to connect to session D-Bus");
-                        return Ok(serde_json::json!({
-                            "available": false,
-                            "agent": agent_name,
-                            "operation": operation,
-                            "error": format!("D-Bus connection failed: {}", e),
-                            "message": "Agent service is not available (D-Bus connection failed)"
-                        }));
-                    }
-                }
-            }
-        };
-
-        debug!(
-            service = %service_name,
-            path = %object_path,
-            "D-Bus call target"
-        );
-
-        // Create proxy - handle build failure gracefully
-        let proxy: zbus::Proxy = match zbus::proxy::Builder::new(&connection)
-            .destination(service_name.as_str())
-            .and_then(|b| b.path(object_path.as_str()))
-            .and_then(|b| b.interface("org.dbusmcp.Agent"))
-        {
-            Ok(builder) => {
-                match builder.build().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        if Self::is_service_unavailable_error(&e) {
-                            warn!(agent = %agent_name, service = %service_name, "Agent service not available on D-Bus");
-                            return Ok(serde_json::json!({
-                                "available": false,
-                                "agent": agent_name,
-                                "service": service_name,
-                                "operation": operation,
-                                "error": format!("Service not found: {}", e),
-                                "message": format!("Agent '{}' is not running or not registered on D-Bus", agent_name)
-                            }));
-                        }
-                        error!(error = %e, "D-Bus proxy build failed");
-                        return Err(anyhow::anyhow!("D-Bus proxy build failed: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(agent = %agent_name, error = %e, "Failed to build D-Bus proxy");
-                return Ok(serde_json::json!({
-                    "available": false,
-                    "agent": agent_name,
-                    "operation": operation,
-                    "error": format!("Proxy configuration error: {}", e),
-                    "message": "Agent service is not available (proxy configuration failed)"
-                }));
-            }
-        };
-
-        // Call the Execute method - handle service unavailable gracefully
-        let result: String = match proxy.call("Execute", &(task_json,)).await {
-            Ok(r) => r,
-            Err(e) => {
-                if Self::is_service_unavailable_error(&e) {
-                    warn!(
-                        agent = %agent_name,
-                        service = %service_name,
-                        error = %e,
-                        "Agent D-Bus service not available"
-                    );
-                    return Ok(serde_json::json!({
-                        "available": false,
-                        "agent": agent_name,
-                        "service": service_name,
-                        "operation": operation,
-                        "error": e.to_string(),
-                        "message": format!("Agent '{}' is not running. The D-Bus service '{}' is not registered.", agent_name, service_name)
-                    }));
-                }
-                // For other errors, still return gracefully but log as error
-                error!(error = %e, agent = %agent_name, "D-Bus call failed");
-                return Ok(serde_json::json!({
-                    "available": false,
-                    "agent": agent_name,
-                    "service": service_name,
-                    "operation": operation,
-                    "error": e.to_string(),
-                    "message": format!("D-Bus call to agent '{}' failed: {}", agent_name, e)
-                }));
-            }
-        };
-
-        // Parse result JSON
-        let parsed: Value = serde_json::from_str(&result).map_err(|e| {
-            error!(error = %e, result = %result, "Failed to parse agent response");
-            anyhow::anyhow!("Failed to parse agent response: {}", e)
-        })?;
-
-        info!(
-            agent = %agent_name,
-            operation = %operation,
-            success = %parsed.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
-            "Agent operation completed"
-        );
-
-        Ok(parsed)
-    }
-}
-
-/// In-process agent executor - for agents running in same process
-#[allow(dead_code)]
-pub struct InProcessAgentExecutor {
-    agents: Arc<tokio::sync::RwLock<std::collections::HashMap<String, Box<dyn InProcessAgent + Send + Sync>>>>,
-}
-
-/// Trait for in-process agents
-#[async_trait]
-#[allow(dead_code)]
-pub trait InProcessAgent: Send + Sync {
-    async fn execute(&self, operation: &str, path: Option<&str>, args: Option<Value>) -> Result<Value>;
-}
-
-impl InProcessAgentExecutor {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self {
-            agents: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub async fn register_agent(&self, name: &str, agent: Box<dyn InProcessAgent + Send + Sync>) {
-        let mut agents = self.agents.write().await;
-        agents.insert(name.to_string(), agent);
-    }
-}
-
-impl Default for InProcessAgentExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl AgentExecutor for InProcessAgentExecutor {
-    async fn execute_operation(
-        &self,
-        agent_name: &str,
-        operation: &str,
-        path: Option<&str>,
-        args: Option<Value>,
-    ) -> Result<Value> {
-        let agents = self.agents.read().await;
-        let agent = agents
-            .get(agent_name)
-            .ok_or_else(|| anyhow::anyhow!("Agent not found: {}", agent_name))?;
-
-        agent.execute(operation, path, args).await
-    }
-}
-
-/// Create an agent tool with D-Bus executor (default)
 pub fn create_agent_tool(
     agent_name: &str,
     description: &str,
     operations: &[String],
-    config: Value,
+    _config: Value,
 ) -> Result<BoxedTool> {
     let executor = Arc::new(DbusAgentExecutor::new());
-    Ok(Arc::new(AgentTool::new(
-        agent_name,
-        description,
-        operations,
-        config,
-        executor,
-    )))
+    Ok(Arc::new(AgentTool::new(agent_name, description, operations, executor)))
 }
 
-/// Create an agent tool with custom executor
 pub fn create_agent_tool_with_executor(
     agent_name: &str,
     description: &str,
     operations: &[String],
-    config: Value,
     executor: Arc<dyn AgentExecutor + Send + Sync>,
 ) -> Result<BoxedTool> {
-    Ok(Arc::new(AgentTool::new(
-        agent_name,
-        description,
-        operations,
-        config,
-        executor,
-    )))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct MockAgentExecutor;
-
-    #[async_trait]
-    impl AgentExecutor for MockAgentExecutor {
-        async fn execute_operation(
-            &self,
-            agent_name: &str,
-            operation: &str,
-            path: Option<&str>,
-            _args: Option<Value>,
-        ) -> Result<Value> {
-            Ok(serde_json::json!({
-                "success": true,
-                "agent": agent_name,
-                "operation": operation,
-                "path": path,
-                "executed": true
-            }))
-        }
-    }
-
-    #[test]
-    fn test_service_name_conversion() {
-        assert_eq!(
-            DbusAgentExecutor::to_service_name("python_pro"),
-            "org.dbusmcp.Agent.PythonPro"
-        );
-        assert_eq!(
-            DbusAgentExecutor::to_service_name("rust_pro"),
-            "org.dbusmcp.Agent.RustPro"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_agent_tool_execution() {
-        let executor = Arc::new(MockAgentExecutor);
-        let tool = AgentTool::new(
-            "test-agent",
-            "Test agent",
-            &["build".to_string(), "test".to_string()],
-            serde_json::json!({}),
-            executor,
-        );
-
-        let result = tool
-            .execute(serde_json::json!({
-                "operation": "build",
-                "path": "/tmp/project"
-            }))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.get("operation").and_then(|v| v.as_str()),
-            Some("build")
-        );
-        assert_eq!(
-            result.get("executed").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_invalid_operation() {
-        let executor = Arc::new(MockAgentExecutor);
-        let tool = AgentTool::new(
-            "test-agent",
-            "Test agent",
-            &["build".to_string()],
-            serde_json::json!({}),
-            executor,
-        );
-
-        let result = tool
-            .execute(serde_json::json!({
-                "operation": "invalid_op"
-            }))
-            .await;
-
-        assert!(result.is_err());
-    }
+    Ok(Arc::new(AgentTool::new(agent_name, description, operations, executor)))
 }

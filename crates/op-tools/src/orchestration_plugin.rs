@@ -245,15 +245,18 @@ impl Default for OrchestrationPluginRegistry {
 // GLOBAL REGISTRY
 // ============================================================================
 
-lazy_static::lazy_static! {
-    /// Global orchestration plugin registry
-    static ref ORCHESTRATION_REGISTRY: Arc<OrchestrationPluginRegistry> = 
-        Arc::new(OrchestrationPluginRegistry::new());
+// Global orchestration plugin registry (initialized eagerly)
+static ORCHESTRATION_REGISTRY: std::sync::OnceLock<Arc<OrchestrationPluginRegistry>> = std::sync::OnceLock::new();
+
+/// Initialize the global orchestration plugin registry (call once at startup)
+pub fn init_orchestration_registry() {
+    ORCHESTRATION_REGISTRY.set(Arc::new(OrchestrationPluginRegistry::new()))
+        .unwrap_or_else(|_| panic!("Orchestration registry already initialized"));
 }
 
 /// Get the global orchestration plugin registry
 pub fn get_orchestration_registry() -> Arc<OrchestrationPluginRegistry> {
-    ORCHESTRATION_REGISTRY.clone()
+    ORCHESTRATION_REGISTRY.get().expect("Orchestration registry not initialized").clone()
 }
 
 // ============================================================================

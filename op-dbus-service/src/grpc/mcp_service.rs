@@ -78,7 +78,17 @@ impl McpService for McpServiceImpl {
 
         let result = match req.method.as_str() {
             "tools/list" => {
-                let tools = self.list_tools_internal().await;
+                let definitions = self.registry.list().await;
+                let tools: Vec<Value> = definitions
+                    .into_iter()
+                    .map(|definition| {
+                        serde_json::json!({
+                            "name": definition.name,
+                            "description": definition.description,
+                            "inputSchema": definition.input_schema,
+                        })
+                    })
+                    .collect();
                 let result = serde_json::json!({ "tools": tools });
                 Ok(serde_json::to_vec(&result).unwrap_or_default())
             }

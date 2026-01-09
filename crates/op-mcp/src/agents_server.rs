@@ -1,945 +1,320 @@
-//! Agents MCP Server - Always-On Cognitive Agents
+//! Agents MCP Server - D-Bus First Architecture
 //!
-//! **Run-On-Connection** (started when client connects):
-//! - `rust_pro` - Rust development (cargo check/build/test/clippy/format)
-//! - `backend_architect` - System design and architecture
-//! - `sequential_thinking` - Step-by-step reasoning
-//! - `memory` - Key-value session memory  
-//! - `context_manager` - Persistent context across sessions
+//! Discovers agents via D-Bus introspection and exposes them as MCP tools.
+//! This is the proper architecture for Project D-Bus.
 //!
-//! **Available** (lazy-loaded on first call):
-//! - `mem0` - Semantic memory with vector search
-//! - `search_specialist` - Code/docs/web search
-//! - `debugger` - Error analysis
-//! - `python_pro` - Python analysis
-//! - `deployment` - Service deployment
-//! - `prompt_engineer` - Prompt optimization
+//! ## How It Works
+//!
+//! 1. Agent Manager starts agents as D-Bus services
+//!    - org.dbusmcp.Agent.RustPro
+//!    - org.dbusmcp.Agent.PythonPro
+//!    - etc.
+//!
+//! 2. This server uses introspection to discover running agents
+//!    - Lists services matching org.dbusmcp.Agent.*
+//!    - Introspects each to get methods/properties
+//!
+//! 3. Exposes discovered agents as MCP tools
+//!    - rust_pro_check, rust_pro_build, etc.
+//!
+//! 4. Tool calls are proxied to D-Bus
+//!    - MCP tool call -> D-Bus method call -> Agent execution
 
-use crate::protocol::{McpRequest, McpResponse, JsonRpcError};
-use crate::{PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use op_core::BusType;
+use op_introspection::ServiceScanner;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
+use zbus::Connection;
 
-/// Agent startup mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentStartupMode {
-    /// Agent process starts when client connects
-    RunOnConnection,
-    /// Agent is available but only started on first call
-    #[default]
-    Available,
-}
-
-/// Configuration for always-on agent
+/// Agent discovered via D-Bus introspection
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AlwaysOnAgent {
+pub struct DiscoveredAgent {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub agent_type: String,
+    pub service_name: String,
+    pub object_path: String,
     pub operations: Vec<String>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub priority: i32,
-    #[serde(default)]
-    pub startup_mode: AgentStartupMode,
-    pub dbus_service: Option<String>,
+    pub available: bool,
 }
 
-fn default_true() -> bool { true }
-
-impl AlwaysOnAgent {
-    pub fn new(id: &str, name: &str, description: &str, operations: Vec<&str>) -> Self {
-        Self {
-            id: id.to_string(),
-            name: name.to_string(),
-            description: description.to_string(),
-            operations: operations.into_iter().map(String::from).collect(),
-            enabled: true,
-            priority: 0,
-            startup_mode: AgentStartupMode::Available,
-            dbus_service: None,
-        }
-    }
-    
-    pub fn with_priority(mut self, priority: i32) -> Self {
-        self.priority = priority;
-        self
-    }
-    
-    pub fn run_on_connection(mut self) -> Self {
-        self.startup_mode = AgentStartupMode::RunOnConnection;
-        self
-    }
-    
-    pub fn with_dbus_service(mut self, service: &str) -> Self {
-        self.dbus_service = Some(service.to_string());
-        self
-    }
+/// MCP tool derived from a D-Bus agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTool {
+    pub name: String,
+    pub description: String,
+    pub agent_id: String,
+    pub operation: String,
+    pub input_schema: Value,
 }
 
-/// Server configuration
-#[derive(Debug, Clone)]
-pub struct AgentsServerConfig {
-    pub name: Option<String>,
-    pub agents: Vec<AlwaysOnAgent>,
-    pub blocked_operations: Vec<String>,
-    pub auto_start_agents: bool,
-}
-
-impl Default for AgentsServerConfig {
-    fn default() -> Self {
-        Self {
-            name: Some("op-mcp-agents".to_string()),
-            agents: default_always_on_agents(),
-            blocked_operations: vec![],
-            auto_start_agents: true,
-        }
-    }
-}
-
-/// Default always-on agents
-/// 
-/// RUN-ON-CONNECTION (5 agents - started immediately when client connects):
-/// 1. rust_pro (priority 100)
-/// 2. backend_architect (priority 99)
-/// 3. sequential_thinking (priority 98)
-/// 4. memory (priority 97)
-/// 5. context_manager (priority 96)
-///
-/// AVAILABLE ON-DEMAND (6 agents - started on first call):
-/// - mem0, search_specialist, python_pro, debugger, deployment, prompt_engineer
-pub fn default_always_on_agents() -> Vec<AlwaysOnAgent> {
-    vec![
-        // ============================================
-        // RUN-ON-CONNECTION AGENTS (5 total)
-        // These start immediately when client connects
-        // ============================================
-        
-        // 1. Rust Pro - Primary development agent for this Rust project
-        AlwaysOnAgent::new(
-            "rust_pro",
-            "Rust Pro",
-            "Rust development: cargo check, build, test, clippy, format. Primary dev agent.",
-            vec!["check", "build", "test", "clippy", "format", "run", "doc", "bench"],
-        )
-        .with_priority(100)
-        .run_on_connection()
-        .with_dbus_service("org.dbusmcp.Agent.RustPro"),
-        
-        // 2. Backend Architect - System design guidance
-        AlwaysOnAgent::new(
-            "backend_architect",
-            "Backend Architect",
-            "System design, architecture review, pattern suggestions, documentation.",
-            vec!["analyze", "design", "review", "suggest", "document"],
-        )
-        .with_priority(99)
-        .run_on_connection()
-        .with_dbus_service("org.dbusmcp.Agent.BackendArchitect"),
-        
-        // 3. Sequential Thinking - Reasoning chains
-        AlwaysOnAgent::new(
-            "sequential_thinking",
-            "Sequential Thinking",
-            "Step-by-step reasoning, problem decomposition, planning, analysis.",
-            vec!["think", "plan", "analyze", "conclude", "reflect"],
-        )
-        .with_priority(98)
-        .run_on_connection()
-        .with_dbus_service("org.dbusmcp.Agent.SequentialThinking"),
-        
-        // 4. Memory - Session state
-        AlwaysOnAgent::new(
-            "memory",
-            "Memory",
-            "Key-value session memory. Remember facts, recall context, manage state.",
-            vec!["remember", "recall", "forget", "list", "search"],
-        )
-        .with_priority(97)
-        .run_on_connection()
-        .with_dbus_service("org.dbusmcp.Agent.Memory"),
-        
-        // 5. Context Manager - Persistent context
-        AlwaysOnAgent::new(
-            "context_manager",
-            "Context Manager",
-            "Persist context across sessions. Save, load, export, import context.",
-            vec!["save", "load", "list", "delete", "export", "import", "clear"],
-        )
-        .with_priority(96)
-        .run_on_connection()
-        .with_dbus_service("org.dbusmcp.Agent.ContextManager"),
-        
-        // ============================================
-        // AVAILABLE ON-DEMAND AGENTS (6 total)
-        // These are lazy-loaded on first call
-        // ============================================
-        
-        AlwaysOnAgent::new(
-            "mem0",
-            "Semantic Memory (Mem0)",
-            "Vector-based semantic memory with similarity search.",
-            vec!["add", "search", "get_all", "delete", "update"],
-        )
-        .with_priority(80)
-        .with_dbus_service("org.dbusmcp.Agent.Mem0"),
-        
-        AlwaysOnAgent::new(
-            "search_specialist",
-            "Search Specialist",
-            "Search code, documentation, and web resources.",
-            vec!["search", "search_code", "search_docs", "search_web"],
-        )
-        .with_priority(75),
-        
-        AlwaysOnAgent::new(
-            "python_pro",
-            "Python Pro",
-            "Python code analysis, execution, and formatting.",
-            vec!["run", "test", "lint", "format", "typecheck"],
-        )
-        .with_priority(70)
-        .with_dbus_service("org.dbusmcp.Agent.PythonPro"),
-        
-        AlwaysOnAgent::new(
-            "debugger",
-            "Debugger",
-            "Error analysis and debugging assistance.",
-            vec!["analyze", "trace", "explain", "fix"],
-        )
-        .with_priority(70),
-        
-        AlwaysOnAgent::new(
-            "deployment",
-            "Deployment",
-            "Service deployment and management.",
-            vec!["deploy", "rollback", "status", "logs"],
-        )
-        .with_priority(60),
-        
-        AlwaysOnAgent::new(
-            "prompt_engineer",
-            "Prompt Engineer",
-            "Generate and optimize prompts.",
-            vec!["generate", "optimize", "analyze", "template"],
-        )
-        .with_priority(50),
-    ]
-}
-
-/// Agent executor trait
-#[async_trait::async_trait]
-pub trait AgentExecutor: Send + Sync {
-    async fn start_agent(&self, agent_id: &str, dbus_service: Option<&str>) -> Result<()>;
-    async fn stop_agent(&self, agent_id: &str) -> Result<()>;
-    async fn execute(&self, agent_id: &str, operation: &str, args: Value) -> Result<Value>;
-    async fn is_running(&self, agent_id: &str) -> bool;
-}
-
-/// D-Bus agent executor
-pub struct DbusAgentExecutor {
+/// Agents MCP Server - discovers and exposes D-Bus agents
+pub struct AgentsServer {
+    scanner: ServiceScanner,
+    connection: Arc<RwLock<Option<Connection>>>,
+    discovered_agents: Arc<RwLock<HashMap<String, DiscoveredAgent>>>,
+    tools: Arc<RwLock<Vec<AgentTool>>>,
     bus_type: BusType,
-    running_agents: RwLock<HashMap<String, bool>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum BusType {
-    System,
-    Session,
-}
-
-impl DbusAgentExecutor {
-    pub fn new() -> Self {
+impl AgentsServer {
+    /// Create a new agents server
+    pub fn new(bus_type: BusType) -> Self {
         Self {
-            bus_type: BusType::System,
-            running_agents: RwLock::new(HashMap::new()),
+            scanner: ServiceScanner::new(),
+            connection: Arc::new(RwLock::new(None)),
+            discovered_agents: Arc::new(RwLock::new(HashMap::new())),
+            tools: Arc::new(RwLock::new(Vec::new())),
+            bus_type,
         }
     }
     
-    pub fn with_session_bus() -> Self {
-        Self {
-            bus_type: BusType::Session,
-            running_agents: RwLock::new(HashMap::new()),
-        }
-    }
-    
-    fn to_service_name(agent_id: &str) -> String {
-        let pascal = agent_id
-            .split('_')
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                }
-            })
-            .collect::<String>();
-        format!("org.dbusmcp.Agent.{}", pascal)
-    }
-    
-    fn to_object_path(agent_id: &str) -> String {
-        let pascal = agent_id
-            .split('_')
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                }
-            })
-            .collect::<String>();
-        format!("/org/dbusmcp/Agent/{}", pascal)
-    }
-}
-
-impl Default for DbusAgentExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentExecutor for DbusAgentExecutor {
-    async fn start_agent(&self, agent_id: &str, dbus_service: Option<&str>) -> Result<()> {
-        let service_name = dbus_service
-            .map(String::from)
-            .unwrap_or_else(|| Self::to_service_name(agent_id));
+    /// Initialize - connect to D-Bus and discover agents
+    pub async fn initialize(&self) -> Result<()> {
+        info!("Initializing Agents MCP Server (D-Bus first)");
         
-        info!(agent = %agent_id, service = %service_name, "Starting agent via D-Bus");
-        self.running_agents.write().await.insert(agent_id.to_string(), true);
-        Ok(())
-    }
-    
-    async fn stop_agent(&self, agent_id: &str) -> Result<()> {
-        info!(agent = %agent_id, "Stopping agent");
-        self.running_agents.write().await.remove(agent_id);
-        Ok(())
-    }
-    
-    async fn execute(&self, agent_id: &str, operation: &str, args: Value) -> Result<Value> {
-        use zbus::Connection;
-        
-        let service_name = Self::to_service_name(agent_id);
-        let object_path = Self::to_object_path(agent_id);
-        
-        let task = json!({
-            "type": agent_id.replace('_', "-"),
-            "operation": operation,
-            "args": serde_json::to_string(&args).unwrap_or_default()
-        });
-        
-        let task_json = serde_json::to_string(&task)?;
-        
-        debug!(agent = %agent_id, operation = %operation, "Executing via D-Bus");
-        
-        let connection = match self.bus_type {
+        // Connect to D-Bus
+        let conn = match self.bus_type {
             BusType::System => Connection::system().await?,
             BusType::Session => Connection::session().await?,
         };
         
-        let proxy: zbus::Proxy = zbus::proxy::Builder::new(&connection)
-            .destination(service_name.as_str())?
-            .path(object_path.as_str())?
-            .interface("org.dbusmcp.Agent")?
-            .build()
-            .await?;
+        {
+            let mut connection = self.connection.write().await;
+            *connection = Some(conn);
+        }
         
-        let result: String = proxy.call("Execute", &(task_json,)).await?;
-        let parsed: Value = serde_json::from_str(&result)?;
+        // Discover agents
+        self.discover_agents().await?;
         
-        Ok(parsed)
-    }
-    
-    async fn is_running(&self, agent_id: &str) -> bool {
-        self.running_agents.read().await.get(agent_id).copied().unwrap_or(false)
-    }
-}
-
-/// In-memory agent executor (for testing)
-pub struct InMemoryAgentExecutor {
-    handlers: HashMap<String, Box<dyn Fn(&str, Value) -> Result<Value> + Send + Sync>>,
-    running: RwLock<HashMap<String, bool>>,
-}
-
-impl InMemoryAgentExecutor {
-    pub fn new() -> Self {
-        let mut executor = Self {
-            handlers: HashMap::new(),
-            running: RwLock::new(HashMap::new()),
-        };
-        executor.register_defaults();
-        executor
-    }
-    
-    fn register_defaults(&mut self) {
-        // Memory agent
-        self.handlers.insert("memory".to_string(), Box::new(|op, args| {
-            match op {
-                "remember" => {
-                    let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
-                    Ok(json!({ "stored": key, "success": true }))
-                }
-                "recall" => {
-                    let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
-                    Ok(json!({ "key": key, "value": null, "found": false }))
-                }
-                "list" => Ok(json!({ "keys": [] })),
-                "forget" => Ok(json!({ "success": true })),
-                "search" => Ok(json!({ "results": [] })),
-                _ => Err(anyhow::anyhow!("Unknown operation: {}", op)),
-            }
-        }));
-        
-        // Sequential thinking agent
-        self.handlers.insert("sequential_thinking".to_string(), Box::new(|op, args| {
-            let thought = args.get("thought").and_then(|t| t.as_str()).unwrap_or("");
-            let step = args.get("step").and_then(|s| s.as_u64()).unwrap_or(1);
-            let total = args.get("total_steps").and_then(|t| t.as_u64()).unwrap_or(5);
-            
-            Ok(json!({
-                "operation": op,
-                "thought": thought,
-                "step": step,
-                "total_steps": total,
-                "status": if step >= total { "complete" } else { "continue" },
-                "success": true
-            }))
-        }));
-        
-        // Context manager agent
-        self.handlers.insert("context_manager".to_string(), Box::new(|op, args| {
-            let name = args.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            match op {
-                "save" => {
-                    let content = args.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    Ok(json!({ "saved": name, "size": content.len(), "success": true }))
-                }
-                "load" => Ok(json!({ "name": name, "content": null, "found": false })),
-                "list" => Ok(json!({ "contexts": [] })),
-                "delete" => Ok(json!({ "deleted": name, "success": true })),
-                "clear" => Ok(json!({ "cleared": true })),
-                "export" | "import" => Ok(json!({ "success": true })),
-                _ => Err(anyhow::anyhow!("Unknown operation: {}", op)),
-            }
-        }));
-        
-        // Rust pro agent
-        self.handlers.insert("rust_pro".to_string(), Box::new(|op, args| {
-            let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-            Ok(json!({
-                "operation": op,
-                "path": path,
-                "status": "ready",
-                "success": true,
-                "output": format!("cargo {} ready at {}", op, path)
-            }))
-        }));
-        
-        // Backend architect agent
-        self.handlers.insert("backend_architect".to_string(), Box::new(|op, args| {
-            let context = args.get("context").and_then(|c| c.as_str()).unwrap_or("");
-            Ok(json!({
-                "operation": op,
-                "context": context,
-                "status": "ready",
-                "success": true
-            }))
-        }));
-    }
-}
-
-impl Default for InMemoryAgentExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl AgentExecutor for InMemoryAgentExecutor {
-    async fn start_agent(&self, agent_id: &str, _dbus_service: Option<&str>) -> Result<()> {
-        info!(agent = %agent_id, "Starting in-memory agent");
-        self.running.write().await.insert(agent_id.to_string(), true);
         Ok(())
     }
     
-    async fn stop_agent(&self, agent_id: &str) -> Result<()> {
-        self.running.write().await.remove(agent_id);
-        Ok(())
-    }
-    
-    async fn execute(&self, agent_id: &str, operation: &str, args: Value) -> Result<Value> {
-        if let Some(handler) = self.handlers.get(agent_id) {
-            handler(operation, args)
-        } else {
-            Err(anyhow::anyhow!("Agent not found: {}", agent_id))
-        }
-    }
-    
-    async fn is_running(&self, agent_id: &str) -> bool {
-        self.running.read().await.get(agent_id).copied().unwrap_or(false)
-    }
-}
-
-/// Agents MCP Server
-pub struct AgentsServer {
-    config: AgentsServerConfig,
-    executor: Arc<dyn AgentExecutor>,
-    client_info: RwLock<Option<ClientInfo>>,
-    running_agents: RwLock<HashMap<String, RunningAgent>>,
-}
-
-#[derive(Debug, Clone)]
-struct ClientInfo {
-    name: String,
-    version: Option<String>,
-}
-
-#[derive(Debug)]
-struct RunningAgent {
-    agent_id: String,
-    started_at: chrono::DateTime<chrono::Utc>,
-    #[allow(dead_code)]
-    dbus_service: Option<String>,
-}
-
-impl AgentsServer {
-    pub fn new(config: AgentsServerConfig) -> Self {
-        Self {
-            config,
-            executor: Arc::new(DbusAgentExecutor::new()),
-            client_info: RwLock::new(None),
-            running_agents: RwLock::new(HashMap::new()),
-        }
-    }
-    
-    pub fn with_executor(config: AgentsServerConfig, executor: Arc<dyn AgentExecutor>) -> Self {
-        Self {
-            config,
-            executor,
-            client_info: RwLock::new(None),
-            running_agents: RwLock::new(HashMap::new()),
-        }
-    }
-    
-    pub fn in_memory(config: AgentsServerConfig) -> Self {
-        Self::with_executor(config, Arc::new(InMemoryAgentExecutor::new()))
-    }
-    
-    /// Start run-on-connection agents
-    async fn start_run_on_connection_agents(&self) -> Result<()> {
-        if !self.config.auto_start_agents {
-            return Ok(());
-        }
+    /// Discover agents via D-Bus introspection
+    pub async fn discover_agents(&self) -> Result<()> {
+        info!("Discovering D-Bus agents...");
         
-        let agents_to_start: Vec<_> = self.config.agents.iter()
-            .filter(|a| a.enabled && a.startup_mode == AgentStartupMode::RunOnConnection)
+        // List all services on the bus
+        let services = self.scanner.list_services(self.bus_type).await?;
+        
+        // Filter for agent services
+        let agent_services: Vec<_> = services
+            .iter()
+            .filter(|s| s.name.starts_with("org.dbusmcp.Agent."))
             .collect();
         
-        info!(
-            count = agents_to_start.len(),
-            agents = ?agents_to_start.iter().map(|a| &a.id).collect::<Vec<_>>(),
-            "Starting run-on-connection agents"
-        );
+        info!("Found {} agent services on D-Bus", agent_services.len());
         
-        for agent in agents_to_start {
-            match self.executor.start_agent(&agent.id, agent.dbus_service.as_deref()).await {
-                Ok(()) => {
-                    let running = RunningAgent {
-                        agent_id: agent.id.clone(),
-                        started_at: chrono::Utc::now(),
-                        dbus_service: agent.dbus_service.clone(),
-                    };
-                    self.running_agents.write().await.insert(agent.id.clone(), running);
-                    info!(agent = %agent.id, "✓ Run-on-connection agent started");
+        let mut discovered = self.discovered_agents.write().await;
+        let mut tools = self.tools.write().await;
+        
+        discovered.clear();
+        tools.clear();
+        
+        // Introspect each agent service
+        for service in agent_services {
+            match self.introspect_agent(&service.name).await {
+                Ok(agent) => {
+                    info!("  ✓ {} ({} operations)", agent.name, agent.operations.len());
+                    
+                    // Create tools for each operation
+                    for op in &agent.operations {
+                        let tool = AgentTool {
+                            name: format!("{}_{}", agent.id, op),
+                            description: format!("[{}] {} - {} operation", agent.name, agent.description, op),
+                            agent_id: agent.id.clone(),
+                            operation: op.clone(),
+                            input_schema: self.get_operation_schema(&agent.agent_type, op),
+                        };
+                        tools.push(tool);
+                    }
+                    
+                    discovered.insert(agent.id.clone(), agent);
                 }
                 Err(e) => {
-                    warn!(agent = %agent.id, error = %e, "✗ Failed to start agent");
+                    warn!("  ✗ Failed to introspect {}: {}", service.name, e);
                 }
             }
         }
         
+        info!("Discovered {} agents with {} total tools", discovered.len(), tools.len());
+        
         Ok(())
     }
     
-    pub async fn shutdown(&self) -> Result<()> {
-        info!("Shutting down agents server");
-        let running = self.running_agents.read().await;
-        for agent_id in running.keys() {
-            if let Err(e) = self.executor.stop_agent(agent_id).await {
-                warn!(agent = %agent_id, error = %e, "Failed to stop agent");
-            }
-        }
-        Ok(())
+    /// Introspect a single agent service
+    async fn introspect_agent(&self, service_name: &str) -> Result<DiscoveredAgent> {
+        let connection = self.connection.read().await;
+        let conn = connection.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected to D-Bus"))?;
+        
+        // Extract agent type from service name
+        // org.dbusmcp.Agent.RustPro -> rust_pro
+        let agent_type_pascal = service_name
+            .strip_prefix("org.dbusmcp.Agent.")
+            .ok_or_else(|| anyhow::anyhow!("Invalid agent service name"))?;
+        let agent_type = pascal_to_snake(agent_type_pascal);
+        let agent_id = agent_type.clone();
+        
+        // Object path
+        let object_path = format!("/org/dbusmcp/Agent/{}", agent_type_pascal);
+        
+        // Create proxy to call introspection methods
+        let proxy = zbus::Proxy::new(
+            conn,
+            &*service_name,
+            &*object_path,
+            "org.dbusmcp.Agent",
+        ).await?;
+        
+        // Get agent metadata
+        let name: String = proxy.call("name", &()).await
+            .unwrap_or_else(|_| agent_type_pascal.to_string());
+        
+        let description: String = proxy.call("description", &()).await
+            .unwrap_or_else(|_| "D-Bus agent".to_string());
+        
+        let operations: Vec<String> = proxy.call("operations", &()).await
+            .unwrap_or_else(|_| vec!["execute".to_string()]);
+        
+        Ok(DiscoveredAgent {
+            id: agent_id,
+            name,
+            description,
+            agent_type,
+            service_name: service_name.to_string(),
+            object_path,
+            operations,
+            available: true,
+        })
     }
     
-    pub async fn handle_request(&self, request: McpRequest) -> McpResponse {
-        debug!(method = %request.method, "Handling agents MCP request");
-        
-        match request.method.as_str() {
-            "initialize" => self.handle_initialize(request).await,
-            "initialized" => McpResponse::success(request.id, json!({})),
-            "ping" => McpResponse::success(request.id, json!({})),
-            "tools/list" => self.handle_tools_list(request).await,
-            "tools/call" => self.handle_tools_call(request).await,
-            "notifications/initialized" => McpResponse::success(request.id, json!({})),
-            "shutdown" => {
-                let _ = self.shutdown().await;
-                McpResponse::success(request.id, json!({ "shutdown": true }))
+    /// Get input schema for an operation
+    fn get_operation_schema(&self, agent_type: &str, operation: &str) -> Value {
+        // Default schema - agents can override via D-Bus properties
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to operate on"
+                },
+                "args": {
+                    "type": "string", 
+                    "description": "Additional arguments"
+                }
             }
-            _ => McpResponse::error(
-                request.id,
-                JsonRpcError::method_not_found(&request.method),
-            ),
-        }
+        })
     }
     
-    async fn handle_initialize(&self, request: McpRequest) -> McpResponse {
-        let client_name = request.params
-            .as_ref()
-            .and_then(|p| p.get("clientInfo"))
-            .and_then(|ci| ci.get("name"))
-            .and_then(|n| n.as_str())
-            .unwrap_or("unknown");
+    /// Execute a tool by calling the D-Bus agent
+    pub async fn execute_tool(&self, tool_name: &str, arguments: Value) -> Result<Value> {
+        debug!("Executing tool: {} with args: {:?}", tool_name, arguments);
         
-        let client_version = request.params
-            .as_ref()
-            .and_then(|p| p.get("clientInfo"))
-            .and_then(|ci| ci.get("version"))
-            .and_then(|v| v.as_str());
+        // Find the tool
+        let tools = self.tools.read().await;
+        let tool = tools.iter()
+            .find(|t| t.name == tool_name)
+            .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
         
-        *self.client_info.write().await = Some(ClientInfo {
-            name: client_name.to_string(),
-            version: client_version.map(String::from),
+        // Find the agent
+        let agents = self.discovered_agents.read().await;
+        let agent = agents.get(&tool.agent_id)
+            .ok_or_else(|| anyhow::anyhow!("Agent not found: {}", tool.agent_id))?;
+        
+        if !agent.available {
+            return Err(anyhow::anyhow!("Agent {} is not available", agent.id));
+        }
+        
+        // Get D-Bus connection
+        let connection = self.connection.read().await;
+        let conn = connection.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not connected to D-Bus"))?;
+        
+        // Create proxy
+        let proxy = zbus::Proxy::new(
+            conn,
+            &*agent.service_name,
+            &*agent.object_path,
+            "org.dbusmcp.Agent",
+        ).await?;
+        
+        // Build task JSON
+        let task = json!({
+            "task_type": agent.agent_type,
+            "operation": tool.operation,
+            "path": arguments.get("path").and_then(|v| v.as_str()),
+            "args": arguments.get("args").and_then(|v| v.as_str()),
+            "config": arguments.get("config").cloned().unwrap_or(json!({}))
         });
         
-        // Start run-on-connection agents
-        if let Err(e) = self.start_run_on_connection_agents().await {
-            error!(error = %e, "Failed to start run-on-connection agents");
-        }
+        let task_json = serde_json::to_string(&task)?;
         
-        // Build list of started agents
-        let started_agents: Vec<_> = self.config.agents.iter()
-            .filter(|a| a.enabled && a.startup_mode == AgentStartupMode::RunOnConnection)
-            .map(|a| a.id.as_str())
-            .collect();
+        // Call D-Bus method
+        let result: String = proxy.call("Execute", &(task_json,)).await
+            .context("D-Bus Execute call failed")?;
         
-        let enabled_count = self.config.agents.iter().filter(|a| a.enabled).count();
+        // Parse result
+        let result_value: Value = serde_json::from_str(&result)
+            .unwrap_or_else(|_| json!({ "output": result }));
         
-        info!(
-            client = %client_name,
-            started = ?started_agents,
-            total = enabled_count,
-            "Agents MCP initialized - run-on-connection agents started"
-        );
-        
-        let server_name = self.config.name.as_deref().unwrap_or("op-mcp-agents");
-        
-        McpResponse::success(request.id, json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": { "listChanged": false }
-            },
-            "serverInfo": {
-                "name": server_name,
-                "version": SERVER_VERSION
-            },
-            "instructions": format!(
-                "Run-on-connection agents STARTED: {}. Use <agent>_<operation> to call.",
-                started_agents.join(", ")
-            ),
-            "_meta": {
-                "startedAgents": started_agents,
-                "totalAgents": enabled_count,
-                "mode": "agents"
+        Ok(result_value)
+    }
+    
+    /// Get list of available agents
+    pub async fn list_agents(&self) -> Vec<DiscoveredAgent> {
+        let agents = self.discovered_agents.read().await;
+        agents.values().cloned().collect()
+    }
+    
+    /// Get list of available tools (for MCP tools/list)
+    pub async fn list_tools(&self) -> Vec<Value> {
+        let tools = self.tools.read().await;
+        tools.iter().map(|t| json!({
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.input_schema
+        })).collect()
+    }
+    
+    /// Refresh agent discovery
+    pub async fn refresh(&self) -> Result<()> {
+        info!("Refreshing agent discovery...");
+        self.discover_agents().await
+    }
+}
+
+/// Convert PascalCase to snake_case
+fn pascal_to_snake(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
             }
-        }))
-    }
-    
-    async fn handle_tools_list(&self, request: McpRequest) -> McpResponse {
-        let mut tools: Vec<Value> = Vec::new();
-        
-        let mut agents: Vec<_> = self.config.agents.iter()
-            .filter(|a| a.enabled)
-            .collect();
-        agents.sort_by(|a, b| b.priority.cmp(&a.priority));
-        
-        for agent in agents {
-            let prefix = if agent.startup_mode == AgentStartupMode::RunOnConnection {
-                "[RUNNING] "
-            } else {
-                ""
-            };
-            
-            for op in &agent.operations {
-                let tool_name = format!("{}_{}", agent.id, op);
-                let description = format!("{}{} - {}", prefix, agent.description, op);
-                
-                tools.push(json!({
-                    "name": tool_name,
-                    "description": description,
-                    "inputSchema": self.get_operation_schema(&agent.id, op),
-                    "annotations": {
-                        "runOnConnection": agent.startup_mode == AgentStartupMode::RunOnConnection,
-                        "priority": agent.priority
-                    }
-                }));
-            }
-        }
-        
-        info!(tool_count = %tools.len(), "Listed agent tools");
-        McpResponse::success(request.id, json!({ "tools": tools }))
-    }
-    
-    async fn handle_tools_call(&self, request: McpRequest) -> McpResponse {
-        let params = match &request.params {
-            Some(p) => p,
-            None => return McpResponse::error(
-                request.id,
-                JsonRpcError::invalid_params("Missing params"),
-            ),
-        };
-        
-        let tool_name = match params.get("name").and_then(|n| n.as_str()) {
-            Some(n) => n,
-            None => return McpResponse::error(
-                request.id,
-                JsonRpcError::invalid_params("Missing tool name"),
-            ),
-        };
-        
-        let (agent_id, operation) = match self.parse_tool_name(tool_name) {
-            Some(parsed) => parsed,
-            None => return McpResponse::error(
-                request.id,
-                JsonRpcError::new(-32001, format!("Invalid tool name: {}", tool_name)),
-            ),
-        };
-        
-        let agent = self.config.agents.iter().find(|a| a.id == agent_id);
-        if agent.is_none() || !agent.unwrap().enabled {
-            return McpResponse::error(
-                request.id,
-                JsonRpcError::new(-32001, format!("Agent not available: {}", agent_id)),
-            );
-        }
-        
-        let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-        let agent = agent.unwrap();
-        
-        // For non-run-on-connection agents, ensure started
-        if agent.startup_mode != AgentStartupMode::RunOnConnection {
-            if !self.executor.is_running(&agent_id).await {
-                info!(agent = %agent_id, "Starting on-demand agent");
-                if let Err(e) = self.executor.start_agent(&agent_id, agent.dbus_service.as_deref()).await {
-                    return McpResponse::success(request.id, json!({
-                        "content": [{ "type": "text", "text": format!("Failed to start agent: {}", e) }],
-                        "isError": true
-                    }));
-                }
-            }
-        }
-        
-        info!(agent = %agent_id, operation = %operation, "Executing agent");
-        
-        match self.executor.execute(&agent_id, &operation, arguments).await {
-            Ok(result) => {
-                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-                McpResponse::success(request.id, json!({
-                    "content": [{ "type": "text", "text": text }],
-                    "isError": false
-                }))
-            }
-            Err(e) => {
-                error!(agent = %agent_id, error = %e, "Agent execution failed");
-                McpResponse::success(request.id, json!({
-                    "content": [{ "type": "text", "text": format!("Error: {}", e) }],
-                    "isError": true
-                }))
-            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
         }
     }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
     
-    fn parse_tool_name(&self, tool_name: &str) -> Option<(String, String)> {
-        for agent in &self.config.agents {
-            let prefix = format!("{}_", agent.id);
-            if tool_name.starts_with(&prefix) {
-                let operation = tool_name.strip_prefix(&prefix)?;
-                if agent.operations.contains(&operation.to_string()) {
-                    return Some((agent.id.clone(), operation.to_string()));
-                }
-            }
-        }
-        None
-    }
-    
-    fn get_operation_schema(&self, agent_id: &str, operation: &str) -> Value {
-        match (agent_id, operation) {
-            // Rust Pro
-            ("rust_pro", "check") | ("rust_pro", "build") | ("rust_pro", "run") |
-            ("rust_pro", "doc") | ("rust_pro", "bench") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Project path", "default": "." },
-                    "release": { "type": "boolean", "description": "Release build", "default": false },
-                    "features": { "type": "string", "description": "Comma-separated features" }
-                }
-            }),
-            ("rust_pro", "test") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "default": "." },
-                    "filter": { "type": "string", "description": "Test filter" },
-                    "features": { "type": "string" }
-                }
-            }),
-            ("rust_pro", "clippy") | ("rust_pro", "format") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "default": "." },
-                    "fix": { "type": "boolean", "default": false }
-                }
-            }),
-            
-            // Backend Architect
-            ("backend_architect", "analyze") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Code path" },
-                    "scope": { "type": "string", "enum": ["file", "module", "crate", "workspace"] }
-                },
-                "required": ["path"]
-            }),
-            ("backend_architect", "design") | ("backend_architect", "suggest") => json!({
-                "type": "object",
-                "properties": {
-                    "context": { "type": "string", "description": "Context or requirements" },
-                    "constraints": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["context"]
-            }),
-            ("backend_architect", "review") => json!({
-                "type": "object",
-                "properties": {
-                    "design": { "type": "string", "description": "Design to review" },
-                    "criteria": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["design"]
-            }),
-            ("backend_architect", "document") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "format": { "type": "string", "default": "markdown" }
-                },
-                "required": ["path"]
-            }),
-            
-            // Sequential Thinking
-            ("sequential_thinking", _) => json!({
-                "type": "object",
-                "properties": {
-                    "thought": { "type": "string", "description": "Current thought" },
-                    "step": { "type": "integer", "description": "Step number" },
-                    "total_steps": { "type": "integer", "description": "Total steps" },
-                    "context": { "type": "string", "description": "Additional context" }
-                },
-                "required": ["thought", "step", "total_steps"]
-            }),
-            
-            // Memory
-            ("memory", "remember") => json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string" },
-                    "value": { "type": "string" }
-                },
-                "required": ["key", "value"]
-            }),
-            ("memory", "recall") | ("memory", "forget") => json!({
-                "type": "object",
-                "properties": {
-                    "key": { "type": "string" }
-                },
-                "required": ["key"]
-            }),
-            ("memory", "list") => json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string" }
-                }
-            }),
-            ("memory", "search") => json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" }
-                },
-                "required": ["query"]
-            }),
-            
-            // Context Manager
-            ("context_manager", "save") => json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "content": { "type": "string" },
-                    "tags": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["name", "content"]
-            }),
-            ("context_manager", "load") | ("context_manager", "delete") => json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" }
-                },
-                "required": ["name"]
-            }),
-            ("context_manager", "list") => json!({
-                "type": "object",
-                "properties": {
-                    "tag": { "type": "string" }
-                }
-            }),
-            ("context_manager", "clear") => json!({
-                "type": "object",
-                "properties": {}
-            }),
-            ("context_manager", "export") | ("context_manager", "import") => json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "format": { "type": "string", "default": "json" }
-                },
-                "required": ["path"]
-            }),
-            
-            // Default
-            _ => json!({
-                "type": "object",
-                "properties": {
-                    "args": { "type": "object" }
-                }
-            }),
-        }
-    }
-    
-    pub fn enabled_agents(&self) -> Vec<&AlwaysOnAgent> {
-        self.config.agents.iter().filter(|a| a.enabled).collect()
-    }
-    
-    pub fn run_on_connection_agents(&self) -> Vec<&AlwaysOnAgent> {
-        self.config.agents.iter()
-            .filter(|a| a.enabled && a.startup_mode == AgentStartupMode::RunOnConnection)
-            .collect()
-    }
-    
-    pub async fn running_agent_ids(&self) -> Vec<String> {
-        self.running_agents.read().await.keys().cloned().collect()
+    #[test]
+    fn test_pascal_to_snake() {
+        assert_eq!(pascal_to_snake("RustPro"), "rust_pro");
+        assert_eq!(pascal_to_snake("PythonPro"), "python_pro");
+        assert_eq!(pascal_to_snake("SequentialThinking"), "sequential_thinking");
+        assert_eq!(pascal_to_snake("BackendArchitect"), "backend_architect");
     }
 }

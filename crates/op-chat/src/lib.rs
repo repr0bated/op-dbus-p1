@@ -10,6 +10,7 @@
 pub mod actor;
 pub mod forced_execution;
 pub mod nl_admin;
+pub mod orchestration;
 pub mod session;
 pub mod system_prompt;
 pub mod tool_executor;
@@ -20,6 +21,10 @@ pub use forced_execution::{
     IssueSeverity, ToolCall, ToolCallResult,
 };
 pub use nl_admin::{NLAdminOrchestrator, NLAdminResult, ExtractedToolCall, ToolExecutionResult};
+pub use orchestration::{
+    builtin_workstacks, GrpcAgentPool, Skill, SkillMetadata, SkillRegistry,
+    Workstack, WorkstackExecutor, WorkstackPhase, WorkstackResult,
+};
 pub use session::SessionManager;
 pub use system_prompt::{create_session_with_system_prompt, generate_system_prompt};
 pub use tool_executor::TrackedToolExecutor;

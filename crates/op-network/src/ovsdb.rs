@@ -288,8 +288,12 @@ impl OvsdbClient {
         // First, find the bridge UUID
         let bridge_uuid = self.find_bridge_uuid(bridge_name).await?;
 
-        let port_uuid = format!("port-{}", port_name);
-        let iface_uuid = format!("iface-{}", port_name);
+        let safe_name: String = port_name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        let port_uuid = format!("port_{}", safe_name);
+        let iface_uuid = format!("iface_{}", safe_name);
 
         // Build interface row - add type if specified
         let interface_row = if let Some(iface_type) = port_type {

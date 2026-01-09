@@ -17,11 +17,10 @@
 
 use anyhow::Result;
 use clap::Parser;
+use op_core::BusType;
 use op_mcp::{
-    McpServer, McpServerConfig,
-    AgentsServer, AgentsServerConfig,
-    ServerMode,
-    transport::{Transport, StdioTransport, HttpSseTransport, WebSocketTransport},
+    AgentsServer, McpServer, McpServerConfig, ServerMode,
+    transport::{HttpSseTransport, StdioTransport, Transport, WebSocketTransport},
 };
 #[cfg(feature = "grpc")]
 use op_mcp::grpc::{GrpcTransport, GrpcConfig};
@@ -153,24 +152,28 @@ async fn main() -> Result<()> {
         }
         
         ServerMode::Agents => {
-            let config = AgentsServerConfig {
-                name: cli.name.or(Some("op-mcp-agents".to_string())),
-                auto_start_agents: !cli.no_auto_start,
-                ..Default::default()
+            let bus_type = if std::env::var("DBUS_AGENT_SESSION").is_ok() {
+                BusType::Session
+            } else {
+                BusType::System
             };
-            
-            let server = Arc::new(AgentsServer::new(config));
-            
-            let roc_agents: Vec<_> = server.run_on_connection_agents()
-                .iter()
-                .map(|a| a.id.as_str())
-                .collect();
+
+            if cli.no_auto_start {
+                info!("--no-auto-start is ignored for D-Bus agents mode");
+            }
+
+            let server = Arc::new(AgentsServer::new(bus_type));
+            server.initialize().await?;
+
+            let agents = server.list_agents().await;
+            let agent_ids: Vec<_> = agents.iter().map(|agent| agent.id.as_str()).collect();
             info!(
-                run_on_connection = ?roc_agents,
-                total = server.enabled_agents().len(),
+                bus = %bus_type,
+                agents = ?agent_ids,
+                total = agents.len(),
                 "Agents MCP server initialized"
             );
-            
+
             run_transports(server, run_stdio, http_addr, ws_addr, grpc_addr).await
         }
     }

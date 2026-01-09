@@ -526,9 +526,8 @@ INTROSPECTION_CACHE_PATH=/var/lib/op-dbus/cache/introspection.db
 # Logging
 RUST_LOG=info,op_chat=debug,op_mcp=debug
 
-# LLM Provider (default to Ollama, can be changed to huggingface, gemini)
-LLM_PROVIDER=ollama
-OLLAMA_URL=http://localhost:11434
+# LLM Provider (default to antigravity, can be changed to huggingface, gemini)
+LLM_PROVIDER=antigravity
 
 # API Keys (loaded from separate secrets file)
 # Source additional secrets if they exist

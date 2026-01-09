@@ -344,8 +344,6 @@ impl WorkflowCache {
             [workflow_id],
         )?;
 
-        drop(db);
-
         // Delete files
         for file in files {
             let data_path = self.cache_dir.join("data").join(&file);
@@ -380,8 +378,6 @@ impl WorkflowCache {
              WHERE workflow_id = ?1 AND step_index = ?2",
             rusqlite::params![workflow_id, step_index],
         )?;
-
-        drop(db);
 
         for file in files {
             let data_path = self.cache_dir.join("data").join(&file);
@@ -419,8 +415,6 @@ impl WorkflowCache {
             "DELETE FROM workflow_step_cache WHERE expires_at < ?1",
             [now],
         )?;
-
-        drop(db);
 
         // Delete files
         for (file, _) in expired {
@@ -485,8 +479,6 @@ impl WorkflowCache {
                 "DELETE FROM workflow_step_cache WHERE cache_key = ?1",
                 [&cache_key],
             )?;
-
-            drop(db.lock());
 
             let data_path = self.cache_dir.join("data").join(&file);
             let _ = std::fs::remove_file(data_path);

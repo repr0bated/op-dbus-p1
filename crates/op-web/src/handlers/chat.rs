@@ -23,6 +23,8 @@ pub struct ChatRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>, // For user-specific API credentials
 }
 
 #[derive(Debug, Serialize)]
@@ -41,7 +43,34 @@ pub async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
-    info!("Chat request: {} chars", request.message.len());
+    info!("Chat request: {} chars, user: {:?}", request.message.len(), request.user_id);
+
+    // Set up user-specific credentials if provided
+    let user_credentials = if let Some(user_id) = &request.user_id {
+        state.user_store.get_user_api_credentials(user_id).await
+    } else {
+        None
+    };
+
+    // Configure chat manager with user credentials if available
+    if let Some(creds) = &user_credentials {
+        if let Some(provider) = &creds.preferred_provider {
+            if let Ok(provider_type) = provider.parse() {
+                let _ = state.chat_manager.switch_provider(provider_type).await;
+            }
+        }
+        // Set user-specific API keys in environment for this request
+        if let Some(key) = &creds.gemini_api_key {
+            std::env::set_var("GEMINI_API_KEY", key);
+        }
+        if let Some(key) = &creds.anthropic_api_key {
+            std::env::set_var("ANTHROPIC_API_KEY", key);
+        }
+        if let Some(key) = &creds.openai_api_key {
+            std::env::set_var("OPENAI_API_KEY", key);
+        }
+    }
+
     if let Some(model) = request.model.as_ref() {
         if let Err(e) = state.chat_manager.switch_model(model.clone()).await {
             error!("Model switch failed: {}", e);
@@ -55,7 +84,7 @@ pub async fn chat_handler(
     // Pass None for event_tx to disable streaming
     // Wrap in timeout to ensure we return an error if it takes too long
     match tokio::time::timeout(
-        Duration::from_secs(290), 
+        Duration::from_secs(290),
         state.orchestrator.process(&session_id, &request.message, None)
     ).await {
         Ok(Ok(result)) => {

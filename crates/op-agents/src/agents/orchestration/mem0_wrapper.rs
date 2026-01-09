@@ -1,12 +1,11 @@
 //! Mem0 Wrapper Agent - Temporarily Disabled
 //!
 //! This agent wraps the Mem0 Python library for semantic memory.
-//! Currently disabled pending embedder configuration (needs Ollama or local embeddings).
+//! Currently disabled pending embedder configuration (needs a supported embeddings backend).
 //!
 //! To re-enable:
-//! 1. Configure Ollama with nomic-embed-text model, OR
-//! 2. Set up HuggingFace embeddings with proper cache paths, OR  
-//! 3. Provide OPENAI_API_KEY for OpenAI embeddings
+//! 1. Set up HuggingFace embeddings with proper cache paths, OR
+//! 2. Provide OPENAI_API_KEY for OpenAI embeddings
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -90,7 +89,7 @@ impl AgentTrait for Mem0WrapperAgent {
     async fn execute(&self, task: AgentTask) -> Result<TaskResult, String> {
         // Return graceful "not available" response
         let error_msg = "Mem0 temporarily disabled - pending embedder configuration. \
-                         To enable: configure Ollama with nomic-embed-text, or provide OPENAI_API_KEY";
+                         To enable: configure HuggingFace embeddings or provide OPENAI_API_KEY";
         
         warn!("Mem0 agent called but disabled: {}", task.operation);
         

@@ -1,9 +1,10 @@
 //! System Tools
 
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use op_core::Tool;
-use sysinfo::{System, SystemExt, CpuExt, DiskExt, ProcessExt};
+use crate::Tool;
+use sysinfo::{Disks, System};
 
 pub struct SystemTool {
     name: String,
@@ -33,7 +34,7 @@ impl Tool for SystemTool {
         json!({"type": "object", "properties": {}})
     }
 
-    async fn execute(&self, _args: Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute(&self, _args: Value) -> Result<Value> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -41,8 +42,8 @@ impl Tool for SystemTool {
             "system_info" => {
                 Ok(json!({
                     "hostname": gethostname::gethostname().to_string_lossy(),
-                    "kernel": sys.kernel_version(),
-                    "os": sys.name(),
+                    "kernel": System::kernel_version(),
+                    "os": System::name(),
                     "cpu_count": sys.cpus().len(),
                     "memory_total_mb": sys.total_memory() / 1024 / 1024,
                     "memory_used_mb": sys.used_memory() / 1024 / 1024
@@ -69,13 +70,17 @@ impl Tool for SystemTool {
                 }))
             }
             "system_disk" => {
-                let disks: Vec<_> = sys.disks().iter()
-                    .map(|d| json!({
-                        "name": d.name().to_string_lossy(),
-                        "mount": d.mount_point().to_string_lossy(),
-                        "total_gb": d.total_space() / 1024 / 1024 / 1024,
-                        "free_gb": d.available_space() / 1024 / 1024 / 1024
-                    }))
+                let disks = Disks::new_with_refreshed_list();
+                let disks: Vec<_> = disks
+                    .iter()
+                    .map(|d| {
+                        json!({
+                            "name": d.name().to_string_lossy(),
+                            "mount": d.mount_point().to_string_lossy(),
+                            "total_gb": d.total_space() / 1024 / 1024 / 1024,
+                            "free_gb": d.available_space() / 1024 / 1024 / 1024
+                        })
+                    })
                     .collect();
                 Ok(json!({"disks": disks}))
             }

@@ -1,692 +1,332 @@
-//! System prompt generation with capability-aware context
+//! System Prompt Generator
 //!
-//! This module generates system prompts that include runtime-detected
-//! capabilities, countering common LLM "I can't do that" responses.
+//! Generates comprehensive system prompts with:
+//! - FIXED PART: Anti-hallucination rules, topology, capabilities (immutable)
+//! - CUSTOM PART: Admin-editable additions loaded from file (mutable)
+//!
+//! The custom part is loaded from:
+//! 1. /etc/op-dbus/custom-prompt.txt (production)
+//! 2. ./custom-prompt.txt (development)
+//! 3. Environment variable CUSTOM_SYSTEM_PROMPT
 
-use op_core::ChatMessage;
 use op_core::self_identity::SelfRepositoryInfo;
+use op_llm::provider::ChatMessage;
+use std::path::Path;
+use tokio::sync::RwLock;
+use tracing::{info, warn, debug};
 
-/// Generate a system prompt with detected capabilities
+/// Paths to check for custom prompt (in order)
+const CUSTOM_PROMPT_PATHS: &[&str] = &[
+    "/etc/op-dbus/custom-prompt.txt",
+    "./custom-prompt.txt",
+    "../custom-prompt.txt",
+];
+
+// =============================================================================
+// FIXED PART - DO NOT ALLOW EDITING
+// =============================================================================
+
+/// Base system prompt with anti-hallucination rules (FIXED - NOT EDITABLE)
+const FIXED_BASE_PROMPT: &str = r#"You are an expert Linux system administration assistant with DIRECT ACCESS to system tools.
+
+## ⚠️ CRITICAL RULES - ANTI-HALLUCINATION (IMMUTABLE)
+
+1. **ALWAYS USE TOOLS** - Never claim to have done something without calling the actual tool
+2. **NO CLI SUGGESTIONS** - Do NOT suggest running `ovs-vsctl`, `systemctl`, `ip`, etc. - USE the native tools instead
+3. **VERIFY BEFORE CLAIMING** - If you say "I created a bridge", you MUST have called ovs_create_bridge
+4. **ADMIT WHEN BLOCKED** - If a tool fails, say so. Do not pretend it succeeded
+5. **NO HALLUCINATED OUTPUTS** - Only report actual tool outputs, never fabricate responses
+
+## YOUR CAPABILITIES
+
+You have DIRECT native protocol access to:
+- **D-Bus** - Direct method calls, no `dbus-send` or `busctl`
+- **OVS** - Native OVSDB protocol, no `ovs-vsctl`
+- **Systemd** - Direct D-Bus interface, no `systemctl`
+- **Network** - rtnetlink protocol, no `ip` command
+- **Files** - Direct filesystem operations
+
+## WHEN USER ASKS FOR AN ACTION
+
+1. Identify the appropriate tool
+2. Call the tool with correct parameters
+3. Report the actual result
+4. If it fails, explain the error and suggest alternatives
+
+## RESPONSE FORMAT
+
+For actions:
+- "I'll [action] using [tool_name]..." 
+- [Call the tool]
+- "Done. Here's what happened: [actual result]"
+
+For queries:
+- "Let me check using [tool_name]..."
+- [Call the tool]
+- "Here's what I found: [actual result]"
+
+NEVER say "you can run" or "try running" - YOU run the tools directly.
+"#;
+
+/// Network topology specification (FIXED - NOT EDITABLE)
+const FIXED_TOPOLOGY_SPEC: &str = r#"
+## TARGET NETWORK TOPOLOGY (REFERENCE)
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    HOST SYSTEM                       │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐  │
+│  │              ovs-br0 (Primary Bridge)         │  │
+│  │                                               │  │
+│  │   VLAN 100 (GhostBridge)  - Management       │  │
+│  │   VLAN 200 (Workloads)    - Containers/VMs   │  │
+│  │   VLAN 300 (Operations)   - Monitoring       │  │
+│  └──────────────────────────────────────────────┘  │
+│                       │                             │
+│  ┌────────────────────┴─────────────────────────┐  │
+│  │              nm0 (Netmaker WireGuard)         │  │
+│  │              Mesh Network Interface           │  │
+│  └───────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+```
+
+- Single OVS bridge: `ovs-br0`
+- VLANs for traffic separation
+- Netmaker interface `nm0` for WireGuard mesh
+- Use native OVS tools (ovs_*), not CLI commands
+"#;
+
+// =============================================================================
+// CUSTOM PART - ADMIN EDITABLE
+// =============================================================================
+
+/// Default custom prompt (used if no custom file exists)
+const DEFAULT_CUSTOM_PROMPT: &str = r#"
+## ADDITIONAL INSTRUCTIONS
+
+You are helpful, accurate, and security-conscious. When in doubt, ask for clarification.
+"#;
+
+/// Cached custom prompt
+static CUSTOM_PROMPT_CACHE: RwLock<Option<CachedPrompt>> = RwLock::const_new(None);
+
+#[derive(Clone)]
+struct CachedPrompt {
+    content: String,
+    loaded_from: String,
+    loaded_at: std::time::Instant,
+}
+
+/// Load custom prompt from file or environment
+pub async fn load_custom_prompt() -> (String, String) {
+    // Check cache first (valid for 60 seconds)
+    {
+        let cache = CUSTOM_PROMPT_CACHE.read().await;
+        if let Some(ref cached) = *cache {
+            if cached.loaded_at.elapsed().as_secs() < 60 {
+                return (cached.content.clone(), cached.loaded_from.clone());
+            }
+        }
+    }
+
+    // Try environment variable first
+    if let Ok(content) = std::env::var("CUSTOM_SYSTEM_PROMPT") {
+        if !content.is_empty() {
+            let source = "environment:CUSTOM_SYSTEM_PROMPT".to_string();
+            cache_prompt(&content, &source).await;
+            return (content, source);
+        }
+    }
+
+    // Try file paths
+    for path_str in CUSTOM_PROMPT_PATHS {
+        let path = Path::new(path_str);
+        if path.exists() {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => {
+                    info!("Loaded custom prompt from: {}", path_str);
+                    let source = format!("file:{}", path_str);
+                    cache_prompt(&content, &source).await;
+                    return (content, source);
+                }
+                Err(e) => {
+                    warn!("Failed to read custom prompt from {}: {}", path_str, e);
+                }
+            }
+        }
+    }
+
+    // Use default
+    debug!("Using default custom prompt");
+    let source = "default".to_string();
+    cache_prompt(DEFAULT_CUSTOM_PROMPT, &source).await;
+    (DEFAULT_CUSTOM_PROMPT.to_string(), source)
+}
+
+async fn cache_prompt(content: &str, source: &str) {
+    let mut cache = CUSTOM_PROMPT_CACHE.write().await;
+    *cache = Some(CachedPrompt {
+        content: content.to_string(),
+        loaded_from: source.to_string(),
+        loaded_at: std::time::Instant::now(),
+    });
+}
+
+/// Save custom prompt to file
+pub async fn save_custom_prompt(content: &str) -> anyhow::Result<String> {
+    let path = Path::new(CUSTOM_PROMPT_PATHS[0]); // /etc/op-dbus/custom-prompt.txt
+    
+    // Ensure directory exists
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    
+    tokio::fs::write(path, content).await?;
+    info!("Saved custom prompt to: {:?}", path);
+    
+    // Invalidate cache
+    {
+        let mut cache = CUSTOM_PROMPT_CACHE.write().await;
+        *cache = None;
+    }
+    
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Clear cache to force reload
+pub async fn invalidate_prompt_cache() {
+    let mut cache = CUSTOM_PROMPT_CACHE.write().await;
+    *cache = None;
+    info!("Prompt cache invalidated");
+}
+
+// =============================================================================
+// PROMPT GENERATION
+// =============================================================================
+
+/// Get the fixed (immutable) part of the system prompt
+pub fn get_fixed_prompt() -> String {
+    let mut fixed = String::new();
+    
+    fixed.push_str(FIXED_BASE_PROMPT);
+    fixed.push_str("\n\n");
+    fixed.push_str(FIXED_TOPOLOGY_SPEC);
+    
+    fixed
+}
+
+/// Generate complete system prompt (fixed + custom + dynamic)
 pub async fn generate_system_prompt() -> ChatMessage {
     let mut prompt = String::new();
-
-    // Base system prompt
-    prompt.push_str(BASE_SYSTEM_PROMPT);
+    
+    // 1. Fixed part (immutable)
+    prompt.push_str(&get_fixed_prompt());
     prompt.push_str("\n\n");
-
-    // Add CRITICAL anti-hallucination warning
-    prompt.push_str("## ⚠️ CRITICAL: NO HALLUCINATIONS ALLOWED\n\n");
-    prompt.push_str("**YOU MUST NEVER claim to have performed an action that you did not actually execute.**\n\n");
-    prompt.push_str("### Hallucination Detection:\n");
-    prompt.push_str("- All tool executions are VERIFIED after completion\n");
-    prompt.push_str("- Bridge creation is checked to confirm the bridge actually exists\n");
-    prompt.push_str("- If verification fails, you will be marked as having hallucinated\n");
-    prompt.push_str(
-        "- **SAYING** you created a bridge without actually calling the tool = HALLUCINATION\n",
-    );
-    prompt.push_str("- **CLAIMING** success without tool execution = HALLUCINATION\n\n");
-    prompt.push_str("### Correct Behavior:\n");
-    prompt.push_str("- If you want to create a bridge: CALL `ovs_create_bridge` tool\n");
-    prompt.push_str("- Wait for the tool result before claiming success\n");
-    prompt.push_str("- Only report what the tool actually returned\n");
-    prompt.push_str("- If tool fails, admit the failure - don't make up excuses\n\n");
-
-    // Add self-repository context if configured
+    
+    // 2. Self-repository context (dynamic, if configured)
     if let Some(self_info) = SelfRepositoryInfo::gather() {
+        info!("Adding self-repository context to system prompt");
         prompt.push_str(&self_info.to_system_prompt_context());
         prompt.push_str("\n\n");
     }
-
-    // Add OVS capabilities context
-    prompt.push_str(&get_ovs_context_sync());
-
-    ChatMessage::system(&prompt)
-}
-
-/// Get OVS capability context (sync version for simplicity)
-fn get_ovs_context_sync() -> String {
-    // Check basic OVS availability without async operations
-    let socket_path = "/var/run/openvswitch/db.sock";
-    let ovsdb_exists = std::path::Path::new(socket_path).exists();
     
-    // Check if we can actually write to the socket (permission check)
-    let ovsdb_writable = if ovsdb_exists {
-        // Use rust's access check if possible, or just metadata
-        std::fs::metadata(socket_path)
-            .map(|m| !m.permissions().readonly())
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    let is_root = unsafe { libc::geteuid() == 0 };
-    let kernel_module = std::fs::read_to_string("/proc/modules")
-        .map(|s| s.contains("openvswitch"))
-        .unwrap_or(false);
-
-    let mut ctx = String::from("## Network Capabilities\n\n");
-
-    if (ovsdb_exists && ovsdb_writable) || kernel_module {
-        ctx.push_str("### OVS (Open vSwitch) Access\n");
-        ctx.push_str("This system has OVS components available:\n\n");
-
-        if ovsdb_exists && ovsdb_writable {
-            ctx.push_str("- ✅ **OVSDB Socket Available and Writable** (`/var/run/openvswitch/db.sock`)\n");
-            ctx.push_str("  - Can list bridges: `ovs_list_bridges` tool\n");
-            ctx.push_str("  - Can create/delete bridges via native OVSDB JSON-RPC\n");
-            ctx.push_str("  - Can manage ports and interfaces\n");
-        } else if ovsdb_exists && !ovsdb_writable {
-            ctx.push_str("- ⚠️ **OVSDB Socket Found but NOT Writable** (Permission Denied)\n");
-            ctx.push_str("  - Current user cannot interact with OVSDB.\n");
-            ctx.push_str("  - Fix: `sudo chmod 666 /var/run/openvswitch/db.sock`\n");
-        }
-
-        if kernel_module {
-            ctx.push_str("- ✅ **OVS Kernel Module Loaded**\n");
-            if is_root {
-                ctx.push_str("  - Can list kernel datapaths: `ovs_list_datapaths` tool\n");
-                ctx.push_str("  - Can list vports: `ovs_list_vports` tool\n");
-                ctx.push_str("  - Can dump kernel flows: `ovs_dump_flows` tool\n");
-            } else {
-                ctx.push_str(
-                    "  - ⚠️ Kernel operations require root (not currently running as root)\n",
-                );
-            }
-        }
-
-        ctx.push_str("\n### OVS Tools Available\n\n");
-        ctx.push_str("**STOP! Do NOT say \"I cannot interact with OVS\"** - you have FULL native access:\n\n");
-
-        ctx.push_str("#### READ Operations:\n");
-        ctx.push_str("- `ovs_check_available` - Check if OVS is running\n");
-        ctx.push_str("- `ovs_list_bridges` - List all OVS bridges\n");
-        ctx.push_str("- `ovs_list_ports` - List ports on a bridge\n");
-        ctx.push_str("- `ovs_get_bridge_info` - Get detailed bridge info\n");
-        ctx.push_str("- `ovs_list_datapaths` - List kernel datapaths\n");
-        ctx.push_str("- `ovs_list_vports` - List vports on a datapath\n");
-        ctx.push_str("- `ovs_dump_flows` - Dump kernel flow table\n");
-        ctx.push_str("- `ovs_capabilities` - Check what's possible\n\n");
-
-        ctx.push_str("#### WRITE Operations (CREATE/DELETE):\n");
-        ctx.push_str(
-            "- `ovs_create_bridge` - Create a new OVS bridge (input: `{\"name\": \"br0\"}`)\n",
-        );
-        ctx.push_str(
-            "- `ovs_delete_bridge` - Delete an OVS bridge (input: `{\"name\": \"br0\"}`)\n",
-        );
-        ctx.push_str("- `ovs_add_port` - Add port to bridge (input: `{\"bridge\": \"br0\", \"port\": \"eth1\"}`)\n\n");
-
-        ctx.push_str("#### How to Create a Bridge with Ports:\n");
-        ctx.push_str("```\n");
-        ctx.push_str("1. ovs_check_available {}  # Verify OVS running\n");
-        ctx.push_str("2. ovs_create_bridge {\"name\": \"ovsbr0\"}  # Create bridge\n");
-        ctx.push_str(
-            "3. ovs_add_port {\"bridge\": \"ovsbr0\", \"port\": \"eth1\"}  # Add uplink\n",
-        );
-        ctx.push_str(
-            "4. ovs_add_port {\"bridge\": \"ovsbr0\", \"port\": \"ovsbr0-int\"}  # Add internal\n",
-        );
-        ctx.push_str("5. ovs_list_ports {\"bridge\": \"ovsbr0\"}  # Verify\n");
-        ctx.push_str("```\n\n");
-
-        ctx.push_str(
-            "These use **native Rust implementations** (OVSDB JSON-RPC, Generic Netlink),\n",
-        );
-        ctx.push_str("NOT shell commands like `ovs-vsctl`. You have direct socket access.\n");
-        ctx.push_str("**You CAN create bridges, add ports, and configure OVS.**\n");
-    } else {
-        ctx.push_str("### OVS Status\n");
-        ctx.push_str("OVS is not detected on this system.\n");
-        ctx.push_str("- OVSDB socket: Not found\n");
-        ctx.push_str("- Kernel module: Not loaded\n");
-    }
-
-    ctx
+    // 3. Custom part (admin editable)
+    let (custom_prompt, source) = load_custom_prompt().await;
+    prompt.push_str("\n\n## 📝 CUSTOM INSTRUCTIONS\n");
+    prompt.push_str(&format!("<!-- Loaded from: {} -->\n", source));
+    prompt.push_str(&custom_prompt);
+    prompt.push_str("\n\n");
+    
+    // 4. Tool summary (dynamic)
+    prompt.push_str(&generate_tool_summary().await);
+    
+    ChatMessage::system(prompt)
 }
 
-/// Base system prompt for the chat assistant
-const BASE_SYSTEM_PROMPT: &str = r#"You are an expert system administration assistant with FULL ACCESS to:
-- Linux system administration via native protocols
-- D-Bus and systemd control
-- **OVS (Open vSwitch) management** - you CAN create bridges, add ports, etc.
-- Network configuration via rtnetlink
-- Container orchestration
-
-## TARGET NETWORK TOPOLOGY SPECIFICATION
-
-**This is the TARGET network architecture. When asked to "set up the network", "configure networking", or "match the topology", configure the system to match this EXACT specification.**
-
-### Architecture Overview - SINGLE OVS BRIDGE DESIGN
-```
-LAYER 1: PHYSICAL
-=================
-ens1 (physical NIC) ──► vmbr0 (Linux bridge) ──► Proxmox host
-IP: 80.209.240.244/24    Ports: ens1             Gateway: 80.209.240.1
-
-LAYER 2: OVS SWITCHING (Single Bridge)
-======================================
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            ovs-br0                                           │
-│                     (Single OVS Bridge)                                      │
-│  Datapath: netdev    Fail-mode: secure    IP: 10.0.0.1/16                   │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         PORT GROUPS                                  │    │
-│  ├──────────────┬──────────────┬──────────────┬────────────────────────┤    │
-│  │  GHOSTBRIDGE │  WORKLOADS   │  OPERATIONS  │  NETMAKER              │    │
-│  │  (Privacy)   │  (Tasks)     │  (Ops)       │  (VPN Overlay)         │    │
-│  │              │              │              │                        │    │
-│  │  gb-{id}     │  ai-{id}     │  mgr-{id}    │  nm0                   │    │
-│  │              │  web-{id}    │  ctl-{id}    │  (WireGuard)           │    │
-│  │  VLAN 100    │  db-{id}     │  mon-{id}    │                        │    │
-│  │  10.100.0/24 │  VLAN 200    │  VLAN 300    │  10.50.0/24            │    │
-│  │              │  10.200.0/24 │  10.30.0/24  │  Enslaved to bridge    │    │
-│  └──────────────┴──────────────┴──────────────┴────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-LAYER 3: OVERLAY/VPN (Netmaker WireGuard Mesh)
-==============================================
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  nm0 (Netmaker Interface) - Enslaved to ovs-br0                             │
-│  Type: WireGuard         Network: privacy-mesh                              │
-│  IP: 10.50.0.129/25      Port: 51820/UDP        MTU: 1420                   │
-│  Traffic: Encrypted peer-to-peer tunnels for GhostBridge (gb-*) ports       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### PORT NAMING CONVENTION
-```
-PREFIX   NAME           VLAN   SUBNET            PURPOSE
-────────────────────────────────────────────────────────────────────────
-gb-      GhostBridge    100    10.100.0.128/25   Privacy/encrypted traffic
-ai-      AI             200    10.200.0.128/25   AI/ML workloads
-web-     Web            200    10.200.1.128/25   Web service containers
-db-      Database       200    10.200.2.128/25   Database containers
-mgr-     Management     300    10.30.0.128/25    Management plane
-ctl-     Control        300    10.30.1.128/25    Control plane
-mon-     Monitoring     300    10.30.2.128/25    Monitoring/observability
-nm0      Netmaker       -      10.50.0.128/25    WireGuard mesh overlay
-```
-
-### OVS BRIDGE CONFIGURATION
-```
-BRIDGE     DATAPATH   FAIL_MODE   IP            DESCRIPTION
-──────────────────────────────────────────────────────────────────────
-ovs-br0    netdev     secure      10.0.0.1/16   Single unified switch
-```
-
-### IP ADDRESS ALLOCATION (/25 subnets, gateway .129)
-```
-NETWORK           SUBNET            GATEWAY        RANGE           PORT PREFIX
-─────────────────────────────────────────────────────────────────────────────
-GhostBridge       10.100.0.128/25   10.100.0.129   .130-.254       gb-
-AI Workloads      10.200.0.128/25   10.200.0.129   .130-.254       ai-
-Web Services      10.200.1.128/25   10.200.1.129   .130-.254       web-
-Databases         10.200.2.128/25   10.200.2.129   .130-.254       db-
-Management        10.30.0.128/25    10.30.0.129    .130-.254       mgr-
-Control           10.30.1.128/25    10.30.1.129    .130-.254       ctl-
-Monitoring        10.30.2.128/25    10.30.2.129    .130-.254       mon-
-Netmaker-Mesh     10.50.0.128/25    10.50.0.129    .130-.254       nm0
-```
-
-### TRAFFIC FLOW RULES
-```
-TRAFFIC TYPE              ACTION
-─────────────────────────────────────────────────────────────────
-GhostBridge → Netmaker    Route gb-* traffic through nm0 for encryption
-Intra-VLAN                Normal L2 switching within same VLAN
-Inter-VLAN                Isolated by default (no cross-VLAN traffic)
-```
-
-### QoS POLICY (Task-Based)
-```
-PORT PREFIX    QUEUE    PRIORITY
-────────────────────────────────────
-ai-*           1        High bandwidth
-web-*          0        Normal
-db-*           2        Low latency
-```
-
-### SOCKET PATHS (Native Protocol Access)
-```
-SERVICE          SOCKET PATH                           PROTOCOL
-────────────────────────────────────────────────────────────────
-OVSDB            /var/run/openvswitch/db.sock          JSON-RPC
-D-Bus System     /var/run/dbus/system_bus_socket       D-Bus
-Netmaker         /var/run/netclient/netclient.sock     gRPC
-```
-
-### NETMAKER OVERLAY
-```
-Interface:      nm0
-Network:        privacy-mesh  
-IP:             10.50.0.129/25
-WireGuard Port: 51820/UDP
-MTU:            1420
-Enslaved to:    ovs-br0
-Purpose:        Encrypted tunnel for GhostBridge (gb-*) traffic
-```
-
-### EXPECTED STATE
-When properly configured, the system should have:
-- Single OVS bridge: ovs-br0 (datapath=netdev, fail_mode=secure)
-- Netmaker interface nm0 as port on ovs-br0
-- Ports follow naming convention: gb-*, ai-*, web-*, db-*, mgr-*, ctl-*, mon-*
-- VLAN tags applied per port prefix (100/200/300)
-- OpenFlow rules for GhostBridge→Netmaker routing and QoS
-
-Use native tools (OVSDB JSON-RPC, rtnetlink) to configure - NOT shell commands like ovs-vsctl or ip.
-
-### LXC DEFAULTS
-- **Template**: Always use `local-btrfs:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst` (Debian 13) unless specified otherwise.
-- **Storage**: Use `local-btrfs` for rootfs.
-- **Networking**:
-  - For standard containers: `eth0` attached to `ovs-br0` via veth pair.
-  - For Netmaker gateway: Attached to `mesh` bridge (if applicable) or `ovs-br0` with special routing.
-- **Privacy Chain**:
-  - `priv_wg` (WireGuard Gateway): Separate container, handles external VPN connection.
-  - `priv_warp` (Cloudflare WARP): Separate container, routes traffic via WARP.
-  - `priv_xray` (Xray Proxy): Separate container, routes traffic via Xray.
-  - **Do NOT** use host interfaces for these; create containers to ensure routing isolation.
-
-## ⚠️ CRITICAL: FORCED TOOL EXECUTION ARCHITECTURE
-
-**YOU MUST USE TOOLS FOR EVERYTHING - INCLUDING RESPONDING TO THE USER.**
-
-This system uses a "forced tool execution" architecture. There are two types of tools:
-
-### 1. Action Tools (for doing things)
-- `ovs_create_bridge`, `ovs_delete_bridge`, `ovs_add_port`
-- `systemd_*` tools for service management
-- Any tool that changes system state
-
-### 2. Response Tools (for communicating)
-- `respond_to_user` - Use this to send ANY message to the user
-- `cannot_perform` - Use this when you cannot do something
-
-**WORKFLOW:**
-1. User asks you to do something
-2. Call the appropriate ACTION TOOL (e.g., `ovs_create_bridge`)
-3. Then call `respond_to_user` to explain the result
-
-**EXAMPLES:**
-
-User: "Create an OVS bridge called br0"
-You should call:
-1. `ovs_create_bridge {"name": "br0"}` - Actually creates the bridge
-2. `respond_to_user {"message": "Created OVS bridge br0", "message_type": "success"}`
-
-User: "What bridges exist?"
-You should call:
-1. `ovs_list_bridges {}` - Gets the list
-2. `respond_to_user {"message": "Found bridges: br0, br1", "message_type": "info"}`
-
-**NEVER:**
-- Claim to have done something without calling the action tool
-- Output text directly without using `respond_to_user`
-- Say "I have created..." when you haven't called `ovs_create_bridge`
-
-## OVS Tools Available
-
-Your OVS tools use:
-- **OVSDB JSON-RPC** (`/var/run/openvswitch/db.sock`) - NOT ovs-vsctl CLI
-- **Generic Netlink** - Direct kernel communication for datapaths
-
-### READ Operations:
-- `ovs_check_available` - Check if OVS is running
-- `ovs_list_bridges` - List all OVS bridges
-- `ovs_list_ports` - List ports on a bridge
-- `ovs_get_bridge_info` - Get detailed bridge info
-
-### WRITE Operations:
-- `ovs_create_bridge {"name": "br0"}` - Create a new OVS bridge
-- `ovs_delete_bridge {"name": "br0"}` - Delete an OVS bridge
-- `ovs_add_port {"bridge": "br0", "port": "eth1"}` - Add port to bridge
-
-## ⛔ FORBIDDEN CLI COMMANDS
-
-**CRITICAL: NEVER use or suggest these CLI tools:**
-
-### Absolutely Forbidden:
-- `ovs-vsctl` - Use OVSDB JSON-RPC tools instead
-- `ovs-ofctl` - Use native OpenFlow tools instead
-- `ovs-flowctl` - Use native OpenFlow/OVS tools instead
-- `ovs-dpctl` - Use Generic Netlink tools instead
-- `ovs-appctl` - FORBIDDEN
-- `ovsdb-client` - Use native JSON-RPC instead
-- `systemctl` - Use D-Bus systemd1 interface instead
-- `service` - Use D-Bus systemd1 interface instead
-- `ip` / `ifconfig` - Use rtnetlink tools instead
-- `nmcli` - Use D-Bus NetworkManager interface instead
-- `brctl` - Use native bridge tools instead
-- `apt` / `yum` / `dnf` - Use D-Bus PackageKit interface instead
-
-### Why CLI Tools Are Forbidden:
-1. **Performance**: CLI spawns processes; native calls use direct sockets
-2. **Reliability**: CLI parsing is fragile; native protocols have structured responses
-3. **Security**: CLI allows command injection; native calls are type-safe
-4. **Observability**: Native calls integrate with metrics; CLI output is opaque
-5. **Policy**: This is enforced at the tool layer when native protocols exist
-
-### CORRECT Approach - Native Protocols Only:
-| Instead of...              | Use...                                    |
-|---------------------------|-------------------------------------------|
-| `ovs-vsctl add-br br0`    | `ovs_create_bridge {"name": "br0"}`       |
-| `ovs-vsctl list-br`       | `ovs_list_bridges {}`                     |
-| `systemctl restart nginx` | D-Bus: systemd1.Manager.RestartUnit       |
-| `ip addr show`            | `list_network_interfaces {}`              |
-| `nmcli con show`          | D-Bus: NetworkManager.GetAllDevices       |
-
-## op-dbus topography (canonical, end-to-end)
-
-This is a system topology spec grounded in the current repo layout and wiring.
-All component names and flows below are backed by concrete code paths.
-
----
-
-## 1) Boundary diagram
-
-### Control plane (decision + orchestration)
-
-* Entry points
-  - D-Bus service: `org.op_dbus.Service` exports Chat + State interfaces (`op-dbus-service/src/main.rs`).
-  - HTTP API: unified Axum server mounts `/api/tools`, `/api/agents`, and `/health` (`op-dbus-service/src/main.rs`, `crates/op-http/src/lib.rs`, `crates/op-tools/src/router.rs`, `crates/op-agents/src/router.rs`).
-  - MCP adapter (optional): `op-mcp-server` bridges MCP JSON-RPC over stdio to `op-chat` (`crates/op-mcp/README.md`, `crates/op-mcp/src/main.rs`).
-
-* Chat orchestration
-  - ChatActor handles requests, tool listing, tool execution, and routing (`crates/op-chat/src/actor.rs`).
-  - TrackedToolExecutor executes tools with per-call tracking (`crates/op-chat/src/tool_executor.rs`).
-
-* State orchestration
-  - StateManager coordinates plugin state queries, diffs, checkpoints, and apply (`crates/op-state/src/manager.rs`).
-  - StatePlugin trait defines the contract for state domains (`crates/op-state/src/plugin.rs`).
-
-### Data plane (side effects + observations)
-
-* D-Bus: system services invoked by tools (systemd operations via zbus) (`crates/op-tools/src/builtin/dbus.rs`).
-* Filesystem + procfs/sysfs: read/write tools (`crates/op-tools/src/builtin/file.rs`, `crates/op-tools/src/builtin/procfs.rs`).
-* External MCP tools: optional tool calls via `mcptools` CLI (`crates/op-tools/src/mcptools.rs`).
-
----
-
-## 2) Runtime topology (who talks to whom)
-
-```
-Clients
-  |                  (D-Bus: org.op_dbus.Service)
-  |                  /org/op_dbus/Chat  -> org.op_dbus.Chat
-  |                  /org/op_dbus/State -> org.op_dbus.State
-  |                         |
-  |                         v
-  |                     ChatActor
-  |                         |
-HTTP / MCP  ----------------|----------------------------------------
-  |                         v
-  |                    TrackedToolExecutor
-  |                         |
-  |                         v
-  |                    ToolRegistry (LRU + lazy)
-  |                         |
-  |                         v
-  |          Tool implementations (D-Bus, file, procfs, MCP)
-  |                         |
-  |                         v
-  |                     External systems
-  |
-  |                         (State flow)
-  |                         v
-  |                    StateManager (op-state)
-  |                         |
-  |                         v
-  |                   StatePlugin implementations
-```
-
-Concrete wiring in the binary (`op-dbus-service/src/main.rs`):
-
-* Initializes a shared ToolRegistry and registers built-ins (`crates/op-tools/src/lib.rs`).
-* Starts ChatActor with the shared registry (`crates/op-chat/src/actor.rs`).
-* Exports D-Bus interfaces:
-  - org.op_dbus.Chat at `/org/op_dbus/Chat` (`op-dbus-service/src/chat.rs`).
-  - org.op_dbus.State at `/org/op_dbus/State` (`op-dbus-service/src/state.rs`).
-* Starts an HTTP server via op-http, mounting `/api/tools` and `/api/agents` (`op-dbus-service/src/main.rs`).
-
----
-
-## 3) Execution flow (tool calls)
-
-### 3.1 D-Bus Chat interface
-
-* Method: `chat(message, session_id)` -> returns string or JSON (`op-dbus-service/src/chat.rs`).
-* Method: `list_tools()` -> returns tool definitions (`op-dbus-service/src/chat.rs`).
-
-Flow:
-1. D-Bus client calls `org.op_dbus.Chat.chat`.
-2. ChatActor receives an RPC request and executes a tool or returns an error (`crates/op-chat/src/actor.rs`).
-3. TrackedToolExecutor resolves the tool in ToolRegistry and executes it (`crates/op-chat/src/tool_executor.rs`).
-4. ExecutionTracker records the execution context/result (`crates/op-core/src/lib.rs`, `crates/op-execution-tracker/src/execution_tracker.rs`).
-
-### 3.2 HTTP tools API
-
-* `GET /api/tools` -> list tools (`crates/op-tools/src/router.rs`).
-* `GET /api/tools/:name` -> tool definition (`crates/op-tools/src/router.rs`).
-* `POST /api/tools/:name/execute` -> direct tool execution (`crates/op-tools/src/router.rs`).
-
-Flow:
-1. HTTP client calls `/api/tools/:name/execute`.
-2. Handler pulls tool from ToolRegistry and executes it directly.
-3. Result is returned as JSON (no ChatActor involved in this path).
-
-### 3.3 MCP adapter (stdio)
-
-* MCP methods map to `op-chat` calls (`crates/op-mcp/README.md`, `crates/op-mcp/src/main.rs`).
-* Flow: stdin JSON-RPC -> ChatActorHandle -> stdout JSON-RPC.
-
----
-
-## 4) State model (desired vs observed)
-
-### 4.1 Desired and current state structures
-
-* DesiredState: `{ version, plugins: { name: <json> } }` (`crates/op-state/src/manager.rs`).
-* CurrentState: `{ plugins: { name: <json> } }` (`crates/op-state/src/manager.rs`).
-
-### 4.2 StatePlugin contract
-
-Each plugin must implement:
-
-* `query_current_state()`
-* `calculate_diff(current, desired)` -> `StateDiff` (with `StateAction`s)
-* `apply_state(diff)` -> `ApplyResult`
-* `create_checkpoint()` / `rollback()`
-* `verify_state()` (optional)
-
-Source: `crates/op-state/src/plugin.rs`.
-
-### 4.3 Apply pipeline (current behavior)
-
-`StateManager::apply_state` executes four phases (`crates/op-state/src/manager.rs`):
-
-1. Checkpoints: call `create_checkpoint()` for each plugin in desired state.
-2. Diff: compute `StateDiff` for each plugin.
-3. Apply: call `apply_state()` for each diff.
-4. Verify: currently disabled (explicitly skipped in code).
-
-Important details:
-
-* Rollback is disabled for failures in the bulk `apply_state` path.
-* Verification is disabled (commented out, with a warning).
-
-These are real runtime semantics today, not aspirational.
-
----
-
-## 5) Built-in tool surface (what actually executes)
-
-### 5.1 Registered by default
-
-`op-tools` registers the following at startup (`crates/op-tools/src/lib.rs`, `crates/op-tools/src/builtin/mod.rs`):
-
-* Filesystem tools: `file_read`, `file_write`, `file_list`, `file_exists`, `file_stat`.
-* procfs/sysfs tools: `procfs_read`, `procfs_write`, `sysfs_read`, `sysfs_write`.
-* D-Bus systemd tools:
-  - `dbus_systemd_start_unit`
-  - `dbus_systemd_stop_unit`
-  - `dbus_systemd_restart_unit`
-  - `dbus_systemd_get_unit_status`
-  - `dbus_systemd_list_units`
-  (all in `crates/op-tools/src/builtin/dbus.rs`)
-* D-Bus introspection tools: registered in `crates/op-tools/src/builtin/dbus_introspection.rs`.
-
-### 5.2 MCP tool injection (optional)
-
-If MCP tool servers are configured, the registry lazily creates tools that proxy through `mcptools` (`crates/op-tools/src/mcptools.rs`).
-
-Configuration inputs:
-
-* `OP_MCPTOOLS_CONFIG` (default `mcptools.json`)
-* `OP_MCPTOOLS_SERVERS`
-* `OP_MCPTOOLS_SERVER` / `OP_MCPTOOLS_SERVER_NAME`
-
----
-
-## 6) D-Bus service topology
-
-### 6.1 Exported name + objects
-
-* Bus name: `org.op_dbus.Service` (`op-dbus-service/src/main.rs`).
-* Objects:
-  - `/org/op_dbus/Chat` implements `org.op_dbus.Chat` (`op-dbus-service/src/chat.rs`).
-  - `/org/op_dbus/State` implements `org.op_dbus.State` (`op-dbus-service/src/state.rs`).
-
-### 6.2 State interface methods
-
-* `get_state(plugin_name)`
-* `get_all_state()`
-* `set_state(plugin_name, state_json)`
-* `set_all_state(state_json)`
-* `apply_from_file(path)`
-* `apply_plugin_from_file(plugin_name, path)`
-
-Source: `op-dbus-service/src/state.rs`.
-
----
-
-## 7) Execution tracking and telemetry
-
-* TrackedToolExecutor uses ExecutionTracker from op-core, which re-exports op-execution-tracker (`crates/op-chat/src/tool_executor.rs`, `crates/op-core/src/lib.rs`).
-* Metrics + telemetry objects are wired in ChatActor::with_registry (`crates/op-chat/src/actor.rs`).
-* A D-Bus execution tracker interface exists but is commented out in `op-dbus-service/src/main.rs`.
-
----
-
-## 8) Optional / not-wired-yet components
-
-These exist in the repo but are not currently wired into the `op-dbus-service` runtime:
-
-* D-Bus introspection service in `op-chat` (currently returns "disabled").
-* Execution tracker D-Bus interface (commented in `op-dbus-service/src/main.rs`).
-* `op-state-store` (SQLite/Redis job ledger) is present but not connected to the service.
-* `op-plugins` provides plugin registry/dynamic loading, but `op-dbus-service` uses `op-state` directly.
-
----
-
-## 9) End-to-end flow examples
-
-### 9.1 Systemd restart via D-Bus tool
-
-```
-Client -> D-Bus org.op_dbus.Chat.chat
-  -> ChatActor.execute_tool
-    -> ToolRegistry.get("dbus_systemd_restart_unit")
-      -> D-Bus call to systemd Manager.RestartUnit
-```
-
-Relevant files:
-
-* `op-dbus-service/src/chat.rs`
-* `crates/op-chat/src/actor.rs`
-* `crates/op-chat/src/tool_executor.rs`
-* `crates/op-tools/src/builtin/dbus.rs`
-
-### 9.2 Desired state apply
-
-```
-Client -> D-Bus org.op_dbus.State.set_all_state
-  -> StateManager.apply_state
-    -> create_checkpoint per plugin
-    -> calculate_diff per plugin
-    -> apply_state per plugin
-    -> verification skipped
-```
-
-Relevant files:
-
-* `op-dbus-service/src/state.rs`
-* `crates/op-state/src/manager.rs`
-* `crates/op-state/src/plugin.rs`
-
----
-
-## 10) Canonical truth summary
-
-* Single D-Bus service: `org.op_dbus.Service` exposes Chat + State.
-* Single HTTP server: `op-http` composes routers; only `/api/tools` and `/api/agents` are mounted by default.
-* Tool execution is centralized via ToolRegistry and TrackedToolExecutor with execution tracking.
-* State management is plugin-based via `op-state` with diff/apply/checkpoint flow.
-* Verification and rollback are currently disabled in bulk apply; this is an explicit runtime behavior.
-
-## File Operations
-
-For reading files (safe operations):
-- `read_file {"path": "/etc/hosts"}` - Read file contents
-- `read_proc {"path": "/proc/meminfo"}` - Read /proc filesystem
-- `read_sys {"path": "/sys/class/net"}` - Read /sys filesystem
-
-## Rules
-
-1. **ALWAYS** use `respond_to_user` for all communication
-2. **ALWAYS** call action tools BEFORE claiming success
-3. **NEVER** suggest CLI commands like ovs-vsctl, systemctl, ip, etc.
-4. **NEVER** say "run this command:" followed by shell commands
-5. Use native protocol tools (D-Bus, OVSDB JSON-RPC, rtnetlink) exclusively
-6. Report actual tool results, not imagined outcomes
-7. If no native tool exists for an operation, use `cannot_perform` to explain
-8. **THOUGHT PROCESS**: For complex tasks, you MUST use the `sequential-thinking` tool to plan your steps and explain your reasoning. This allows the user to see your thought process.
-
-## Assistant Roles (Important)
-
-`bash-pro` and `python-pro` are coding assistants only. They produce scripts or code but do NOT act as execution agents or system engineers. Use them for authoring and review, not for claiming system changes.
-
-## How to Run Bash Commands (MCP)
-
-Use MCP tools:
-- `shell_execute` for a single command
-- `shell_execute_batch` for an ordered list of commands
-
-Always call the tool first, then report exactly what it returned."#;
-
-/// Create a session with system prompt pre-loaded
-pub async fn create_session_with_system_prompt() -> (String, Vec<ChatMessage>) {
-    let system_msg = generate_system_prompt().await;
-    let session_id = uuid::Uuid::new_v4().to_string();
-    (session_id, vec![system_msg])
+/// Generate a summary of available tools
+async fn generate_tool_summary() -> String {
+    let mut summary = String::from("## AVAILABLE TOOLS\n\n");
+    
+    summary.push_str("### Core Categories:\n");
+    summary.push_str("- **OVS**: ovs_list_bridges, ovs_create_bridge, ovs_delete_bridge, ovs_add_port, ovs_del_port\n");
+    summary.push_str("- **Systemd**: dbus_systemd_list_units, dbus_systemd_get_unit, dbus_systemd_start, dbus_systemd_stop\n");
+    summary.push_str("- **Network**: list_network_interfaces, get_interface_details, add_ip_address\n");
+    summary.push_str("- **D-Bus**: dbus_list_services, dbus_introspect, dbus_call_method\n");
+    summary.push_str("- **Files**: read_file, write_file, list_directory, search_files\n");
+    summary.push_str("- **Shell**: shell_execute (use only when no native tool exists)\n");
+    
+    // Self tools if available
+    if std::env::var("OP_SELF_REPO_PATH").is_ok() {
+        summary.push_str("\n### Self-Repository Tools:\n");
+        summary.push_str("- `self_read_file`, `self_write_file`, `self_list_directory`, `self_search_code`\n");
+        summary.push_str("- `self_git_status`, `self_git_diff`, `self_git_commit`, `self_git_log`\n");
+        summary.push_str("- `self_build`, `self_deploy`\n");
+    }
+    
+    summary
+}
+
+/// Generate a minimal system prompt (for token-constrained models)
+pub fn generate_minimal_prompt() -> ChatMessage {
+    ChatMessage::system(
+        "You are a Linux system admin assistant. Use tools for all actions. \
+         Never suggest CLI commands - use native tools directly. \
+         Report actual tool outputs only."
+    )
+}
+
+/// Create a session with the full system prompt
+pub async fn create_session_with_system_prompt() -> Vec<ChatMessage> {
+    vec![generate_system_prompt().await]
+}
+
+/// Get prompt metadata for admin UI
+pub async fn get_prompt_metadata() -> PromptMetadata {
+    let (custom_content, source) = load_custom_prompt().await;
+    
+    PromptMetadata {
+        fixed_part: get_fixed_prompt(),
+        custom_part: custom_content,
+        custom_source: source,
+        has_self_repo: std::env::var("OP_SELF_REPO_PATH").is_ok(),
+        self_repo_path: std::env::var("OP_SELF_REPO_PATH").ok(),
+    }
+}
+
+/// Metadata about the system prompt configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PromptMetadata {
+    pub fixed_part: String,
+    pub custom_part: String,
+    pub custom_source: String,
+    pub has_self_repo: bool,
+    pub self_repo_path: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    
     #[tokio::test]
-    async fn test_generate_system_prompt() {
+    async fn test_system_prompt_generation() {
         let prompt = generate_system_prompt().await;
-        assert!(!prompt.content.is_empty());
-        assert!(prompt.content.contains("expert system"));
+        assert!(prompt.content.contains("ANTI-HALLUCINATION"));
+        assert!(prompt.content.contains("ovs-br0"));
+        assert!(prompt.content.contains("CUSTOM INSTRUCTIONS"));
     }
-
+    
     #[test]
-    fn test_ovs_context_sync() {
-        let ctx = get_ovs_context_sync();
-        assert!(ctx.contains("Network Capabilities") || ctx.contains("OVS"));
+    fn test_fixed_prompt() {
+        let fixed = get_fixed_prompt();
+        assert!(fixed.contains("CRITICAL RULES"));
+        assert!(fixed.contains("TOPOLOGY"));
+    }
+    
+    #[tokio::test]
+    async fn test_load_custom_prompt() {
+        let (content, source) = load_custom_prompt().await;
+        assert!(!content.is_empty());
+        assert!(!source.is_empty());
     }
 }

@@ -1,73 +1,73 @@
 
-  1 | //! Tool Adapter - Bridges op-tools and external MCPs to MCP protocol
-  2 | //!
-  3 | //! Aggregates tools from:
-  4 | //! - External MCP servers (GitHub, filesystem, etc.)
-  5 | //! - Local op-tools (filtered for safety)
-  6 | //!
-  7 | //! SECURITY: System commands (shell_execute, systemd_*, ovs_*, etc.) are
-  8 | //! NOT exposed via MCP. Use the web interface for system operations.
-  9 |
- 10 | use anyhow::Result;
- 11 | use serde_json::{json, Value};
- 12 | use std::sync::Arc;
- 13 |
- 14 | use crate::external_client::{ExternalMcpManager, ExternalTool};
- 15 | use op_core::{ToolDefinition, ToolRequest};
- 16 | use op_tools::ToolRegistry;
+//! Tool Adapter - Bridges op-tools and external MCPs to MCP protocol
+//!
+//! Aggregates tools from:
+//! - External MCP servers (GitHub, filesystem, etc.)
+//! - Local op-tools (filtered for safety)
+//!
+//! SECURITY: System commands (shell_execute, systemd_*, ovs_*, etc.) are
+//! NOT exposed via MCP. Use the web interface for system operations.
+
+use anyhow::Result;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+use crate::external_client::{ExternalMcpManager, ExternalTool};
+use op_core::{ToolDefinition, ToolRequest};
+use op_tools::ToolRegistry;
 use op_execution_tracker::{ExecutionContext, ExecutionResult, ExecutionStatus, ExecutionTracker};
 use op_dynamic_loader::{ExecutionAwareLoader, SmartLoadingStrategy};
- 17 |
- 18 | /// Patterns that block tools from being exposed via MCP.
- 19 | /// Uses substring matching - if the tool name contains any of these patterns, it's blocked.
- 20 | const BLOCKED_PATTERNS: &[&str] = &[
- 21 |     // Shell/Execution
- 22 |     "shell_execute",
- 23 |     "write_file",
- 24 |     // Systemd mutations
- 25 |     "systemd_start",
- 26 |     "systemd_stop",
- 27 |     "systemd_restart",
- 28 |     "systemd_reload",
- 29 |     "systemd_enable",
- 30 |     "systemd_disable",
- 31 |     "systemd_apply",
- 32 |     // OVS mutations
- 33 |     "ovs_create",
- 34 |     "ovs_delete",
- 35 |     "ovs_add",
- 36 |     "ovs_set",
- 37 |     // Plugin mutations (matches any *_apply pattern)
- 38 |     "_apply",
- 39 |     // BTRFS mutations
- 40 |     "btrfs_create",
- 41 |     "btrfs_delete",
- 42 |     "btrfs_snapshot",
- 43 | ];
- 44 |
- 45 | /// Check if a tool name should be blocked from MCP exposure
- 46 | fn is_tool_blocked(name: &str) -> bool {
- 47 |     BLOCKED_PATTERNS
- 48 |         .iter()
- 49 |         .any(|pattern| name.contains(pattern))
- 50 | }
- 51 |
- 52 | fn is_orchestration_tool(name: &str) -> bool {
- 53 |     name.starts_with("skill_") || name.starts_with("workstack_") || name.starts_with("workflow_")
- 54 | }
- 55 |
- 56 | /// Check if a tool should be included based on MCP_TOOL_FILTER environment variable
- 57 | /// Returns true if tool should be included, false if filtered out
- 58 | fn matches_tool_filter(name: &str) -> bool {
- 59 |     let filter = std::env::var("MCP_TOOL_FILTER").ok().as_deref();
- 60 |
- 61 |     match filter {
- 62 |         Some("systemd") => name.starts_with("dbus_systemd1_"),
- 63 |         Some("login") => name.starts_with("dbus_login1_"),
- 64 |         Some("ovs") => name.starts_with("ovs_"),
- 65 |         Some("agents") => name.starts_with("agent_") || name.starts_with("list_") || name.starts_with("spawn_") || name.contains("agent"),
- 66 |         Some("core") => name.starts_with("dbus_DBus_") || name.starts_with("dbus_login1_") || name.starts_with("ovs_") || name.starts_with("plugin_"),
- 67 |         Some("skills") => is_orchestration_tool(name),
+
+/// Patterns that block tools from being exposed via MCP.
+/// Uses substring matching - if the tool name contains any of these patterns, it's blocked.
+const BLOCKED_PATTERNS: &[&str] = &[
+// Shell/Execution
+"shell_execute",
+"write_file",
+// Systemd mutations
+"systemd_start",
+"systemd_stop",
+"systemd_restart",
+"systemd_reload",
+"systemd_enable",
+"systemd_disable",
+"systemd_apply",
+// OVS mutations
+"ovs_create",
+"ovs_delete",
+"ovs_add",
+"ovs_set",
+// Plugin mutations (matches any *_apply pattern)
+"_apply",
+// BTRFS mutations
+"btrfs_create",
+"btrfs_delete",
+"btrfs_snapshot",
+];
+
+/// Check if a tool name should be blocked from MCP exposure
+fn is_tool_blocked(name: &str) -> bool {
+BLOCKED_PATTERNS
+.iter()
+.any(|pattern| name.contains(pattern))
+}
+
+fn is_orchestration_tool(name: &str) -> bool {
+name.starts_with("skill_") || name.starts_with("workstack_") || name.starts_with("workflow_")
+}
+
+/// Check if a tool should be included based on MCP_TOOL_FILTER environment variable
+/// Returns true if tool should be included, false if filtered out
+fn matches_tool_filter(name: &str) -> bool {
+let filter = std::env::var("MCP_TOOL_FILTER").ok().as_deref();
+
+match filter {
+Some("systemd") => name.starts_with("dbus_systemd1_"),
+Some("login") => name.starts_with("dbus_login1_"),
+Some("ovs") => name.starts_with("ovs_"),
+Some("agents") => name.starts_with("agent_") || name.starts_with("list_") || name.starts_with("spawn_") || name.contains("agent"),
+Some("core") => name.starts_with("dbus_DBus_") || name.starts_with("dbus_login1_") || name.starts_with("ovs_") || name.starts_with("plugin_"),
+Some("skills") => is_orchestration_tool(name),
         Some(unknown) => {
             tracing::warn!("Unknown MCP_TOOL_FILTER value: '{}'. Including all tools.", unknown);
             true // Default to include all for unknown filters

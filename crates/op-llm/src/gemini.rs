@@ -35,7 +35,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
 
-use crate::provider::{LlmProvider, ProviderType, ModelInfo, ChatMessage, ChatResponse, ChatRequest, ToolDefinition, ToolCallInfo, ToolChoice, TokenUsage};
+use crate::provider::{LlmProvider, ProviderType, ModelInfo, ChatMessage, ChatResponse, ChatRequest, ToolCallInfo, ToolChoice, TokenUsage};
 
 // =============================================================================
 // API ENDPOINT CONFIGURATION

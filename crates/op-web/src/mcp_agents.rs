@@ -28,6 +28,7 @@ use op_agents::agents::orchestration::mem0_wrapper::Mem0WrapperAgent;
 // Additional agents
 use op_agents::agents::seo::search_specialist::SearchSpecialistAgent;
 use op_agents::agents::infrastructure::deployment::DeploymentAgent;
+use op_agents::agents::infrastructure::network::NetworkEngineerAgent;
 use op_agents::agents::language::python_pro::PythonProAgent;
 use op_agents::agents::language::rust_pro::RustProAgent;
 use op_agents::agents::architecture::BackendArchitectAgent;
@@ -103,6 +104,8 @@ impl CriticalAgentsState {
             Arc::new(PythonProAgent::new("python_pro".to_string())),
             // Architecture agents
             Arc::new(BackendArchitectAgent::new("backend_architect".to_string())),
+            // Network agents
+            Arc::new(NetworkEngineerAgent::new("network_engineer".to_string())),
             // Additional requested agents
             Arc::new(SearchSpecialistAgent::new("search_specialist".to_string())),
             Arc::new(DeploymentAgent::new("deployment".to_string())),

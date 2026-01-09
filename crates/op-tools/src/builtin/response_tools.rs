@@ -68,15 +68,18 @@ impl ResponseAccumulator {
     }
 }
 
-// Global response accumulator (per-turn)
-lazy_static::lazy_static! {
-    static ref RESPONSE_ACCUMULATOR: Arc<RwLock<ResponseAccumulator>> = 
-        Arc::new(RwLock::new(ResponseAccumulator::new()));
+// Global response accumulator (initialized eagerly)
+static RESPONSE_ACCUMULATOR: std::sync::OnceLock<Arc<RwLock<ResponseAccumulator>>> = std::sync::OnceLock::new();
+
+/// Initialize the global response accumulator (call once at startup)
+pub fn init_response_accumulator() {
+    RESPONSE_ACCUMULATOR.set(Arc::new(RwLock::new(ResponseAccumulator::new())))
+        .unwrap_or_else(|_| panic!("Response accumulator already initialized"));
 }
 
 /// Get the global response accumulator
 pub fn get_response_accumulator() -> Arc<RwLock<ResponseAccumulator>> {
-    RESPONSE_ACCUMULATOR.clone()
+    RESPONSE_ACCUMULATOR.get().expect("Response accumulator not initialized").clone()
 }
 
 // ============================================================================
@@ -183,7 +186,8 @@ impl Tool for RespondToUserTool {
         };
 
         {
-            let mut accumulator = RESPONSE_ACCUMULATOR.write().await;
+            let accumulator_arc = get_response_accumulator();
+            let mut accumulator = accumulator_arc.write().await;
             accumulator.add(response);
         }
 
@@ -311,7 +315,8 @@ impl Tool for CannotPerformTool {
         };
 
         {
-            let mut accumulator = RESPONSE_ACCUMULATOR.write().await;
+            let accumulator_arc = get_response_accumulator();
+            let mut accumulator = accumulator_arc.write().await;
             accumulator.add(response);
         }
 
@@ -443,7 +448,8 @@ impl Tool for RequestClarificationTool {
         };
 
         {
-            let mut accumulator = RESPONSE_ACCUMULATOR.write().await;
+            let accumulator_arc = get_response_accumulator();
+            let mut accumulator = accumulator_arc.write().await;
             accumulator.add(response);
         }
 

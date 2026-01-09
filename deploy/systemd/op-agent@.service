@@ -22,7 +22,7 @@ Type=dbus
 BusName=org.dbusmcp.Agent.%I
 
 # Run the agent with the instance name as the agent type
-ExecStart=/usr/local/bin/dbus-agent --system %i
+ExecStart=/usr/local/sbin/dbus-agent --system %i
 
 # Restart on failure
 Restart=on-failure

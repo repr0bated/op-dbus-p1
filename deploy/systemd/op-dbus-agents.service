@@ -1,43 +1,35 @@
 [Unit]
-Description=OP-DBUS Agent Manager
-Documentation=https://github.com/ghostbridgetech/op-dbus
-After=dbus.service
+Description=OP-DBUS Agent Manager - D-Bus Agent Services
+Documentation=https://github.com/ghostbridge/op-dbus
+After=dbus.service network.target
 Requires=dbus.service
 
 [Service]
-Type=dbus
-BusName=org.opdbus.AgentManager
+Type=simple
 User=root
 Group=root
+
+# Environment
 EnvironmentFile=-/etc/op-dbus/environment
 EnvironmentFile=-/etc/op-dbus/secrets.env
-WorkingDirectory=/opt/op-dbus
-ExecStart=/opt/op-dbus/bin/op-agent-manager
+
+# The agent manager starts all agents as D-Bus services
+ExecStart=/usr/local/sbin/dbus-agent-manager
+
+# Restart on failure
 Restart=on-failure
 RestartSec=5
 
-# D-Bus activation
-ExecReload=/bin/kill -HUP $MAINPID
-
-# Resource limits
-LimitNOFILE=65536
-LimitNPROC=4096
-
-# Security (less restrictive since we need to spawn agents)
-NoNewPrivileges=no
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=no
-PrivateDevices=no
-
-# Read-write paths
-ReadWritePaths=/var/lib/op-dbus /var/log/op-dbus /run/op-dbus /tmp
+# Allow time for agents to register
+TimeoutStartSec=60
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=op-dbus-agents
 
+# D-Bus access
+BusName=org.dbusmcp.AgentManager
+
 [Install]
 WantedBy=multi-user.target
-Alias=dbus-org.opdbus.AgentManager.service

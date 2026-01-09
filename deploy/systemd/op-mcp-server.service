@@ -1,8 +1,7 @@
 [Unit]
 Description=OP-DBUS MCP Protocol Server
 Documentation=https://github.com/ghostbridgetech/op-dbus
-After=network.target op-chat-server.service
-BindsTo=op-chat-server.service
+After=network.target
 
 [Service]
 Type=simple
@@ -11,7 +10,7 @@ Group=op-dbus
 EnvironmentFile=-/etc/op-dbus/environment
 EnvironmentFile=-/etc/op-dbus/secrets.env
 WorkingDirectory=/opt/op-dbus
-ExecStart=/opt/op-dbus/bin/op-mcp-server
+ExecStart=/usr/local/sbin/op-mcp-server
 Restart=always
 RestartSec=5
 

@@ -199,8 +199,7 @@ OP_DBUS_LOG_DIR=/var/log/op-dbus
 RUST_LOG=info,op_chat=debug
 
 # LLM Provider
-LLM_PROVIDER=ollama
-OLLAMA_URL=http://localhost:11434
+LLM_PROVIDER=antigravity
 EOF
         log_success "Environment file created"
     else

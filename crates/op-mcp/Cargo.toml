@@ -41,6 +41,7 @@ prost = { version = "0.12", optional = true }
 # Internal crates
 op-core = { path = "../op-core" }
 op-tools = { path = "../op-tools" }
+op-introspection = { path = "../op-introspection" }
 op-chat = { path = "../op-chat", optional = true }
 
 [build-dependencies]

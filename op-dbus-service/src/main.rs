@@ -113,6 +113,18 @@ async fn main() -> Result<()> {
     register_skill_tools(&registry).await?;
     info!("Initialized Tool Registry");
 
+    // Initialize response accumulator (eager)
+    op_tools::builtin::response_tools::init_response_accumulator();
+    info!("Initialized Response Accumulator (eager)");
+
+    // Initialize security validator (eager)
+    op_tools::security::init_security_validator();
+    info!("Initialized Security Validator (eager)");
+
+    // Initialize orchestration registry (eager)
+    op_tools::orchestration_plugin::init_orchestration_registry();
+    info!("Initialized Orchestration Registry (eager)");
+
     // --- 2. Initialize Streaming Blockchain ---
     let blockchain_path = std::env::var("OP_BLOCKCHAIN_PATH")
         .unwrap_or_else(|_| "/var/lib/op-dbus/blockchain".to_string());

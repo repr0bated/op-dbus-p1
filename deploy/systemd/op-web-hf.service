@@ -7,11 +7,11 @@ Wants=network-online.target op-agent@bash-pro.service
 Type=simple
 User=jeremy
 Group=jeremy
-WorkingDirectory=/home/jeremy/op-dbus-v2
+WorkingDirectory=/usr/local/sbin
 
 # Core runtime env
 Environment="PORT=8080"
-Environment="STATIC_DIR=/home/jeremy/op-dbus-v2/static"
+Environment="STATIC_DIR=/usr/local/share/op-dbus/static"
 Environment="RUST_LOG=info"
 
 # LLM config (token/model/base-url pulled from optional env file)
@@ -22,11 +22,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/jeremy/op-dbus-v2
+ReadWritePaths=/var/lib/op-dbus
 CapabilityBoundingSet=
 
 # Start chat server (builds on first run if binary missing)
-ExecStart=/home/jeremy/op-dbus-v2/start-chat-server.sh
+ExecStart=/usr/local/sbin/op-web-server
 
 # Restart policy
 Restart=always

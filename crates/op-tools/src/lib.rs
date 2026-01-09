@@ -43,6 +43,7 @@ pub use orchestration_plugin::{
 
 /// Register all built-in tools
 pub async fn register_builtin_tools(registry: &ToolRegistry) -> anyhow::Result<()> {
+    builtin::register_all_builtin_tools(registry).await?;
     builtin::register_response_tools(registry).await?;
     if let Err(err) = mcptools::register_mcp_tools(registry).await {
         warn!("Failed to register MCP tools: {}", err);

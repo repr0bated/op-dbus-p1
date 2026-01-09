@@ -255,11 +255,13 @@ pub fn get_native_recommendation(command: &str) -> Option<&'static str> {
 // ============================================================================
 
 /// Security validator for access-level based security
+#[derive(Debug)]
 pub struct SecurityValidator {
     profile: RwLock<ToolSecurityProfile>,
     rate_limiter: RwLock<HashMap<String, RateLimitState>>,
 }
 
+#[derive(Debug)]
 struct RateLimitState {
     count: u32,
     window_start: Instant,
@@ -479,15 +481,18 @@ impl Default for SecurityValidator {
 // GLOBAL VALIDATOR INSTANCE
 // ============================================================================
 
-lazy_static::lazy_static! {
-    /// Global security validator instance with ADMIN access by default
-    pub static ref SECURITY_VALIDATOR: Arc<SecurityValidator> = 
-        Arc::new(SecurityValidator::with_admin_profile());
+// Global security validator instance (initialized eagerly)
+static SECURITY_VALIDATOR: std::sync::OnceLock<Arc<SecurityValidator>> = std::sync::OnceLock::new();
+
+/// Initialize the global security validator (call once at startup)
+pub fn init_security_validator() {
+    SECURITY_VALIDATOR.set(Arc::new(SecurityValidator::with_admin_profile()))
+        .unwrap_or_else(|_| panic!("Security validator already initialized"));
 }
 
 /// Get the global security validator
 pub fn get_security_validator() -> Arc<SecurityValidator> {
-    SECURITY_VALIDATOR.clone()
+    SECURITY_VALIDATOR.get().expect("Security validator not initialized").clone()
 }
 
 // ============================================================================
